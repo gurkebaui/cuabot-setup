@@ -267,7 +267,7 @@ def screenshot(window_name=None):
             from io import BytesIO
             from PIL import Image
             img = Image.open(BytesIO(raw))
-            max_side = 640
+            max_side = 854
             if max(img.size) > max_side:
                 scale = max_side / float(max(img.size))
                 new_size = (max(1, int(img.size[0] * scale)),
