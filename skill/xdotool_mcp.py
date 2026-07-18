@@ -429,6 +429,12 @@ def _to_global(x, y, name, window_id):
 SHOT_MAX_SIDE = 854
 
 _PRIMARY = None  # cached (x, y, w, h) of the primary monitor in global space
+# Coordinate mapping from the most recent screenshot, so the model can click
+# using the coords it SAW without passing an explicit name. Set by
+# screenshot()/screenshot_around_cursor(): {"ox","oy","sx","sy"} where
+# global = (ox + x*sx, oy + y*sy). Stored in a dict (not a bare global) to avoid
+# the `global` declaration pitfalls.
+STATE = {"map": None}
 
 
 def _primary_monitor():
@@ -465,6 +471,43 @@ def _from_primary(x, y):
     px, py, pw, ph = _primary_monitor()
     s = max(pw, ph) / float(SHOT_MAX_SIDE)
     return int(px + x * s), int(py + y * s)
+
+
+def _cursor_pos():
+    """Return the current real cursor position as (x, y) global."""
+    try:
+        loc = subprocess.run(["xdotool", "getmouselocation"],
+                             capture_output=True, text=True, timeout=10).stdout
+        m = re.search(r"x:(\d+)\s+y:(\d+)", loc)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+    except Exception:
+        pass
+    return 0, 0
+
+
+def _map_click(x, y, name, window_id):
+    """Translate screenshot-space coords (what the model saw) to GLOBAL coords.
+
+    Priority:
+      1. name=="primary"  -> primary-monitor mapping.
+      2. name resolves to a real window -> window-local mapping.
+      3. otherwise        -> the mapping cached from the most recent screenshot
+         (screenshot / screenshot_around_cursor). This means the model can just
+         click(x, y) with the coords it read and it lands correctly, WITHOUT
+         having to pass the right name. Fixes the 'clicked the wrong place'
+         bug where the name was omitted.
+    Falls back to treating (x, y) as already-global if nothing resolves."""
+    if name and name.lower() == "primary":
+        return _from_primary(x, y)
+    wid = _resolve_wid(window_id, name)
+    if wid is not None:
+        return _to_global(x, y, name, window_id)
+    m = STATE.get("map")
+    if m is not None:
+        return int(m["ox"] + x * m["sx"]), int(m["oy"] + y * m["sy"])
+    # nothing to map against: assume already global
+    return x, y
 
 
 def press_key(key, window_id=None, name="mGBA"):
@@ -522,20 +565,17 @@ def type_text(text, window_id=None, name="mGBA"):
     return {"ok": ok, "chars": len(text), "error": err}
 
 
-def click(x, y, button="left", count=1, window_id=None, name="mGBA"):
-    """Click at coords from a screenshot; translated to global coords.
-    - name="primary": coords are from the downscaled primary-monitor screenshot
-      (screenshot(window_name="primary")); auto upscaled + offset to global.
-    - other name: window-local coords (window geometry offset added).
-    - no name: coords are already global.
-    Mouse uses xdotool (correct global multi-monitor coords)."""
-    if name and name.lower() == "primary":
-        gx, gy = _from_primary(x, y)
-    else:
-        gx, gy = _to_global(x, y, name, window_id)
+def click(x, y, button="left", count=1, window_id=None, name=None):
+    """Click at coords from the most recent screenshot (auto-mapped).
+
+    The model can just call click(x, y) with the coords it READ from the last
+    screenshot (primary / window / around-cursor) and it lands correctly — the
+    server caches that screenshot's coordinate mapping. Pass name="primary" to
+    force the primary-monitor mapping, or a window name for window-local coords."""
+    gx, gy = _map_click(x, y, name, window_id)
     btn = _btn(button)
     wid = _resolve_wid(window_id, name)
-    if wid:
+    if wid is not None:
         cmd = ["xdotool", "windowactivate", "--sync", str(wid),
                "mousemove", str(gx), str(gy)]
     else:
@@ -547,15 +587,11 @@ def click(x, y, button="left", count=1, window_id=None, name="mGBA"):
     return {"ok": True, "x": x, "y": y, "global": [gx, gy], "button": button}
 
 
-def drag(x1, y1, x2, y2, button="left", window_id=None, name="mGBA"):
-    """Drag between coords from a screenshot; translated to global.
-    name="primary" uses the downscaled primary-monitor screenshot coords."""
-    if name and name.lower() == "primary":
-        gx1, gy1 = _from_primary(x1, y1)
-        gx2, gy2 = _from_primary(x2, y2)
-    else:
-        gx1, gy1 = _to_global(x1, y1, name, window_id)
-        gx2, gy2 = _to_global(x2, y2, name, window_id)
+def drag(x1, y1, x2, y2, button="left", window_id=None, name=None):
+    """Drag between coords from the most recent screenshot (auto-mapped).
+    Uses the cached coordinate mapping from the last screenshot."""
+    gx1, gy1 = _map_click(x1, y1, name, window_id)
+    gx2, gy2 = _map_click(x2, y2, name, window_id)
     btn = _btn(button)
     wid = _resolve_wid(window_id, name)
     steps = max(2, min(20, abs(gx2 - gx1) + abs(gy2 - gy1) // 20))
@@ -573,13 +609,9 @@ def drag(x1, y1, x2, y2, button="left", window_id=None, name="mGBA"):
             "global_from": [gx1, gy1], "global_to": [gx2, gy2], "error": err}
 
 
-def scroll(x, y, direction="up", amount=3, window_id=None, name="mGBA"):
-    """Scroll at coords from a screenshot; translated to global.
-    name="primary" uses the downscaled primary-monitor screenshot coords."""
-    if name and name.lower() == "primary":
-        gx, gy = _from_primary(x, y)
-    else:
-        gx, gy = _to_global(x, y, name, window_id)
+def scroll(x, y, direction="up", amount=3, window_id=None, name=None):
+    """Scroll at coords from the most recent screenshot (auto-mapped)."""
+    gx, gy = _map_click(x, y, name, window_id)
     btn = "4" if (direction or "").lower() in ("up", "left") else "5"
     wid = _resolve_wid(window_id, name)
     for _ in range(max(1, min(50, amount))):
@@ -593,13 +625,9 @@ def scroll(x, y, direction="up", amount=3, window_id=None, name="mGBA"):
     return {"ok": True, "x": x, "y": y, "global": [gx, gy], "direction": direction, "amount": amount}
 
 
-def mouse_move(x, y, window_id=None, name="mGBA"):
-    """Move the real cursor to coords from a screenshot; translated to global.
-    name="primary" uses the downscaled primary-monitor screenshot coords."""
-    if name and name.lower() == "primary":
-        gx, gy = _from_primary(x, y)
-    else:
-        gx, gy = _to_global(x, y, name, window_id)
+def mouse_move(x, y, window_id=None, name=None):
+    """Move the real cursor to coords from the most recent screenshot (auto-mapped)."""
+    gx, gy = _map_click(x, y, name, window_id)
     wid = _resolve_wid(window_id, name)
     if wid:
         ok, err = _run(["xdotool", "windowactivate", "--sync", str(wid),
@@ -658,11 +686,13 @@ def screenshot(window_name=None):
             img.save(buf, format="PNG")
             raw = buf.getvalue()
             b64 = base64.b64encode(raw).decode("ascii")
+            # cache coordinate mapping so click(x,y) auto-maps from THIS image
+            STATE["map"] = {"ox": px, "oy": py, "sx": scale, "sy": scale}
             meta = {"scale": round(scale, 4),
                     "monitor": {"x": px, "y": py, "w": pw, "h": ph},
                     "note": "coords you read from this image are in the "
-                            "downscaled space; click(name='primary', x, y) "
-                            "maps them back automatically"}
+                            "downscaled space; click(x, y) maps them back "
+                            "automatically (or pass name='primary')"}
             return {"content": [{"type": "image", "data": b64, "mimeType": "image/png"},
                                 {"type": "text", "text": json.dumps(meta)}]}
 
@@ -680,6 +710,18 @@ def screenshot(window_name=None):
             return {"isError": True, "content": [{"type": "text",
                     "text": json.dumps({"error": "no window to capture"})}]}
         wid = int(wid)
+        # capture window geometry (for coordinate mapping) + downscale
+        win_x = win_y = 0
+        try:
+            geo = subprocess.run(["xdotool", "getwindowgeometry", "--shell", str(wid)],
+                                 capture_output=True, text=True, timeout=10).stdout
+            for ln in geo.splitlines():
+                if ln.startswith("X="):
+                    win_x = int(ln.split("=")[1])
+                elif ln.startswith("Y="):
+                    win_y = int(ln.split("=")[1])
+        except Exception:
+            pass
         png = subprocess.run(["scrot", "-w", str(wid), tmppath],
                              capture_output=True, text=True, timeout=15)
         if png.returncode != 0 or not os.path.getsize(tmppath):
@@ -693,12 +735,14 @@ def screenshot(window_name=None):
         # Downscale before encoding — a 1440p window PNG is enormous in base64
         # and blows the model context. Cap the longest side (default 854 ~
         # "480p is plenty" for a game) so the image is tiny in context.
+        win_scale = 1.0
         try:
             from io import BytesIO
             from PIL import Image
             img = Image.open(BytesIO(raw))
             if max(img.size) > SHOT_MAX_SIDE:
                 sc = SHOT_MAX_SIDE / float(max(img.size))
+                win_scale = 1.0 / sc  # upscale factor back to original px
                 new_size = (max(1, int(img.size[0] * sc)),
                             max(1, int(img.size[1] * sc)))
                 img = img.resize(new_size, Image.LANCZOS)
@@ -708,8 +752,78 @@ def screenshot(window_name=None):
         except Exception:
             pass  # fall back to the full-res PNG if PIL/resizing fails
         b64 = base64.b64encode(raw).decode("ascii")
+        # cache coordinate mapping so click(x,y) auto-maps from THIS image
+        STATE["map"] = {"ox": win_x, "oy": win_y, "sx": win_scale, "sy": win_scale}
         # Return ONLY the image block — minimal token cost.
         return {"content": [{"type": "image", "data": b64, "mimeType": "image/png"}]}
+    except Exception as e:
+        return {"isError": True, "content": [{"type": "text",
+                "text": json.dumps({"error": str(e)})}]}
+
+
+def mouse_location():
+    """Return the current real cursor position (x, y) in global coords."""
+    x, y = _cursor_pos()
+    return {"ok": True, "x": x, "y": y}
+
+
+def screenshot_around_cursor(radius=200, max_side=512):
+    """Capture a SMALL, HIGH-RES box centered on the real cursor.
+
+    Unlike the full-screen/primary screenshot, this zooms into a `radius`x`radius`
+    region around the mouse and downscales only to `max_side` (default 512) — so
+    the model gets a detailed close-up of whatever is under the pointer, not a
+    tiny downscaled whole screen.
+
+    Returns the image + a `meta` block with the captured region's global top-left
+    and the upscale factor, so click(x, y) inside this crop maps back exactly.
+    The coordinate mapping is also cached, so click(x, y) after this screenshot
+    auto-maps into the crop."""
+    import base64
+    try:
+        import tempfile, os
+        fd, tmppath = tempfile.mkstemp(suffix=".png")
+        os.close(fd)
+        os.remove(tmppath)
+        png = subprocess.run(["scrot", tmppath],
+                             capture_output=True, text=True, timeout=15)
+        if png.returncode != 0 or not os.path.getsize(tmppath):
+            try: os.remove(tmppath)
+            except Exception: pass
+            return {"isError": True, "content": [{"type": "text",
+                    "text": json.dumps({"error": "scrot failed",
+                                         "stderr": png.stderr[:200]})}]}
+        from io import BytesIO
+        from PIL import Image
+        img = Image.open(tmppath)
+        os.remove(tmppath)
+        cx, cy = _cursor_pos()
+        r = int(radius)
+        # crop region in the full-screen image (global coords == image coords
+        # for a full scrot, since scrot captures the root window 1:1)
+        x0 = max(0, cx - r)
+        y0 = max(0, cy - r)
+        x1 = cx + r
+        y1 = cy + r
+        crop = img.crop((x0, y0, x1, y1))
+        # downscale the SMALL crop to max_side (high detail relative to region)
+        sc = max_side / float(max(crop.size)) if max(crop.size) > max_side else 1.0
+        if sc < 1.0:
+            crop = crop.resize((max(1, int(crop.size[0] * sc)),
+                                max(1, int(crop.size[1] * sc))), Image.LANCZOS)
+        buf = BytesIO()
+        crop.save(buf, format="PNG")
+        raw = buf.getvalue()
+        b64 = base64.b64encode(raw).decode("ascii")
+        # mapping: global = (x0 + x*up, y0 + y*up) where up = region/max_side
+        up = (2 * r) / float(max(crop.size)) if max(crop.size) else 1.0
+        STATE["map"] = {"ox": x0, "oy": y0, "sx": up, "sy": up}
+        meta = {"cursor": [cx, cy], "region": {"x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0},
+                "upscale": round(up, 4),
+                "note": "high-res close-up around the cursor; click(x, y) with "
+                        "coords from THIS image maps back into the crop"}
+        return {"content": [{"type": "image", "data": b64, "mimeType": "image/png"},
+                            {"type": "text", "text": json.dumps(meta)}]}
     except Exception as e:
         return {"isError": True, "content": [{"type": "text",
                 "text": json.dumps({"error": str(e)})}]}
@@ -750,6 +864,11 @@ TOOLS = [
     {"name": "mouse_move", "description": "Move the real cursor to coords from a screenshot; translated to global. name=\"primary\" uses the downscaled primary-monitor screenshot coords.",
      "inputSchema": {"type": "object", "properties": {
          "x": {"type": "integer"}, "y": {"type": "integer"}, "window_id": {"type": "integer"}, "name": {"type": "string"}}}},
+    {"name": "mouse_location", "description": "Return the current real cursor position (x, y) in global screen coords. Useful to know where the pointer is before taking a crop screenshot.",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "screenshot_around_cursor", "description": "Capture a SMALL high-res box (radius x radius px) centered on the real cursor, downscaled only to max_side (default 512) for detail. Returns the close-up image + a meta block. click(x, y) with coords from this image auto-maps back into the crop. Great for precision clicking on small UI.",
+     "inputSchema": {"type": "object", "properties": {
+         "radius": {"type": "integer", "default": 200}, "max_side": {"type": "integer", "default": 512}}}},
 ]
 
 
@@ -786,6 +905,10 @@ def _dispatch(method, params, req_id):
                              args.get("amount", 3), args.get("window_id"), args.get("name", "mGBA"))
             elif name == "mouse_move":
                 res = mouse_move(args.get("x", 0), args.get("y", 0), args.get("window_id"), args.get("name", "mGBA"))
+            elif name == "mouse_location":
+                res = mouse_location()
+            elif name == "screenshot_around_cursor":
+                res = screenshot_around_cursor(args.get("radius", 200), args.get("max_side", 512))
             elif name == "screenshot":
                 res = screenshot(args.get("window_name"))
             else:

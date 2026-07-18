@@ -20,28 +20,32 @@ vision step. After taking a screenshot, just READ it. Also: the conversation is
 auto-compressed when it gets long, so you can work for many turns without
 running out of context.
 
-# GENERAL DESKTOP MODE (primary monitor)
-Use the SINGLE-MONITOR fast path:
-- mcp_xdotool_screenshot(window_name="primary")  -> captures the PRIMARY monitor
-  only (downscaled, ~0 text tokens). Returns the image PLUS a small `meta` block
-  telling you the coordinate `scale` and the monitor's `monitor` rect.
-- Coordinates you READ from that image are in the DOWNSCALED space. To click,
-  just pass them straight back: mcp_xdotool_click(x, y, name="primary"). The
-  server upscales by `scale` and adds the monitor offset automatically — the
-  click lands exactly where you pointed. You do NOT do any math.
-- mcp_xdotool_press_key(key=..., name="<app>")  -> real keyboard into any window
-  (uses ydotool kernel input; works on flatpak/sandboxed apps too). For normal
-  desktop apps pass the window's name (e.g. name="kwrite", name="firefox"); if
-  you omit name it acts globally.
-- mcp_xdotool_type_text(text=..., name="<app>")  -> real typing into any window.
-- mcp_xdotool_drag / scroll / mouse_move  -> also accept name="primary" with
-  downscaled coords, OR a window name for window-local coords.
+# GENERAL DESKTOP MODE (primary monitor, or any window)
+Two ways to SEE the screen, both return an image + a tiny meta block:
+
+1. mcp_xdotool_screenshot(window_name="primary")  -> the PRIMARY monitor only,
+   downscaled (fast). Use this for general desktop control.
+2. mcp_xdotool_screenshot_around_cursor(radius=200)  -> a SMALL high-res box
+   centered on the real cursor (great for clicking small/tiny UI precisely).
+   Call mcp_xdotool_mouse_location() first if you want to know where the cursor is.
+
+COORDINATES — READ THEM AND CLICK THEM, NO MATH:
+- The image you get back is downscaled. Just READ pixel coordinates from it.
+- To act, call mcp_xdotool_click(x, y) with those SAME numbers. The server
+  remembers the last screenshot's coordinate mapping and translates your
+  downscaled coords back to real screen pixels automatically. You do NOT pass
+  any window name for clicks — just the x, y you saw.
+- (If you ever switch monitors/windows between screenshot and click, pass
+  name="primary" to click to force the primary-monitor mapping.)
+- mcp_xdotool_drag / scroll / mouse_move use the same auto-mapping.
 
 RULES for desktop:
-1. Always screenshot(window_name="primary") first to SEE what's there.
-2. Read pixel coordinates FROM the screenshot you got, then click(name="primary",
-   x, y) with those same numbers. The server handles scaling + monitor offset.
-3. To type into a specific app, name it (e.g. name="kwrite") so input lands there.
+1. screenshot first (primary, or around_cursor for precision).
+2. read coords from THAT image, then click(x, y) with those numbers.
+3. to type into a specific app: mcp_xdotool_press_key(key=..., name="<app>")
+   or mcp_xdotool_type_text(text=..., name="<app>") so input lands there.
+   (Keyboard defaults to the mGBA game if you omit name — so ALWAYS name the
+   desktop app for typing, e.g. name="kwrite".)
 
 # mGBA MODE — HOW INPUT WORKS (IMPORTANT)
 mGBA runs a Lua control script (mgba_agent.lua) that opens a TCP socket

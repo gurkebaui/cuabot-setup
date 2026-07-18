@@ -11,7 +11,7 @@ custom_providers:
     api_key: lmstudio
     api_mode: chat_completions
     models:
-      - gemma-4-12b-qat
+      - qwen3.5-9b-mtp
     discover_models: true
 toolsets:
   - hermes-cli
@@ -34,13 +34,13 @@ agent:
 auxiliary:
   vision:
     provider: lmstudio
-    model: gemma-4-12b-qat
+    model: qwen3.5-9b-mtp
     base_url: http://localhost:1234/v1
     api_key: lmstudio
     timeout: 300
     context_length: 90000
   compression:
-    model: gemma-4-12b-qat
+    model: qwen3.5-9b-mtp
     context_length: 90000
 onboarding:
   seen:
