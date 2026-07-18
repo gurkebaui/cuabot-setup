@@ -34,11 +34,26 @@ Without step 1, keys do nothing. Mouse via `--window` works regardless.
                                     safety net + enables foreground visibility.)
 - `profile/config.yaml`             cuabot profile config. Copy to
                                     `~/.hermes/profiles/cuabot/config.yaml`
+                                    NOTE: toolsets = [hermes-cli, mcp:xdotool]
+                                    — computer_use is DELIBERATELY removed (the
+                                    screenshot tool below replaces its capture).
 - `profile/SOUL.md`                 cuabot system prompt (strict tool-use rules).
                                     Copy to `~/.hermes/profiles/cuabot/SOUL.md`
 - `skill/xdotool_mcp.py`            The MCP server. Copy to
                                     `~/.hermes/skills/desktop-control-xdotool/xdotool_mcp.py`
 - `skill/SKILL.md`                  Skill doc.
+
+## Screenshot cost fix (why computer_use is removed)
+`computer_use capture` returns a multimodal block with a ~1.5k-token SOM/AX
+summary TEXT per capture — that was the slow/costly part. The MCP server has a
+`screenshot(window_name=)` tool that captures the window via `scrot -w WID` and
+returns ONLY an image block (no text) -> ~0 text tokens per screenshot. The
+model receives the image directly. Verified: model sees + describes the mGBA
+screen from the MCP screenshot tool.
+
+Window-name resolution in `_find_window` returns an int window_id; `screenshot`
+handles both int and str. `scrot` refuses to overwrite existing files, so the
+temp path is removed before capture.
 
 ## Setup
 1. Copy the four files above to their destinations.

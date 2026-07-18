@@ -218,6 +218,56 @@ def mouse_move(x, y, window_id=None, name=None):
     return {"ok": ok, "x": x, "y": y, "window_id": window_id, "error": err}
 
 
+def screenshot(window_name=None):
+    """Capture a window to PNG and return it as an MCP image block.
+
+    Returns ONLY the image (no SOM/AX summary text) so the model pays ~0 text
+    tokens per screenshot — the whole point of moving capture off cua-driver,
+    whose capture attaches a ~1.5k-token 'SOM index + summary' text block.
+
+    If window_name is given, capture that window; otherwise capture the
+    currently-focused window.
+    """
+    import base64
+    wid = None
+    if window_name:
+        wid, _ = _find_window(window_name)
+    if wid is None:
+        # frontmost focused window
+        try:
+            wid = subprocess.run(["xdotool", "getwindowfocus"],
+                                 capture_output=True, text=True, timeout=10).stdout.strip()
+        except Exception:
+            wid = None
+    if not wid or (isinstance(wid, str) and not wid.isdigit()):
+        return {"isError": True, "content": [{"type": "text",
+                "text": json.dumps({"error": "no window to capture"})}]}
+    wid = int(wid)
+    try:
+        import tempfile, os
+        fd, tmppath = tempfile.mkstemp(suffix=".png")
+        os.close(fd)
+        # scrot refuses to overwrite an existing file, so remove the empty
+        # placeholder mkstemp created and let scrot create it fresh.
+        os.remove(tmppath)
+        png = subprocess.run(["scrot", "-w", str(wid), tmppath],
+                             capture_output=True, text=True, timeout=15)
+        if png.returncode != 0 or not os.path.getsize(tmppath):
+            try: os.remove(tmppath)
+            except Exception: pass
+            return {"isError": True, "content": [{"type": "text",
+                    "text": json.dumps({"error": "scrot failed", "stderr": png.stderr[:200]})}]}
+        with open(tmppath, "rb") as f:
+            raw = f.read()
+        os.remove(tmppath)
+        b64 = base64.b64encode(raw).decode("ascii")
+        # Return ONLY the image block — minimal token cost.
+        return {"content": [{"type": "image", "data": b64, "mimeType": "image/png"}]}
+    except Exception as e:
+        return {"isError": True, "content": [{"type": "text",
+                "text": json.dumps({"error": str(e)})}]}
+
+
 # ---------------------------------------------------------------------------
 # MCP protocol (hand-rolled JSON-RPC over stdio)
 # ---------------------------------------------------------------------------
@@ -248,6 +298,9 @@ TOOLS = [
     {"name": "mouse_move", "description": "Move the real cursor to (x,y).",
      "inputSchema": {"type": "object", "properties": {
          "x": {"type": "integer"}, "y": {"type": "integer"}, "window_id": {"type": "integer"}, "name": {"type": "string"}}}},
+    {"name": "screenshot", "description": "Capture a window to an image (returns ONLY the image, no text — cheap). window_name: capture that window (e.g. 'mGBA'); if omitted, capture the focused window. Use this instead of computer_use capture to save tokens.",
+     "inputSchema": {"type": "object", "properties": {
+         "window_name": {"type": "string"}}}},
 ]
 
 
@@ -282,6 +335,8 @@ def _dispatch(method, params, req_id):
                              args.get("amount", 3), args.get("window_id"), args.get("name"))
             elif name == "mouse_move":
                 res = mouse_move(args.get("x", 0), args.get("y", 0), args.get("window_id"), args.get("name"))
+            elif name == "screenshot":
+                res = screenshot(args.get("window_name"))
             else:
                 res = {"error": f"unknown tool {name}"}
         except Exception as e:

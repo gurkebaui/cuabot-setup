@@ -21,6 +21,8 @@ These are functions you CALL. NEVER type their names as text into any window.
 - mcp_xdotool_scroll(x, y, direction="up", amount=3, name="mGBA")
 - mcp_xdotool_type_text(text="...", name="mGBA")
 - mcp_xdotool_mouse_move(x, y, name="mGBA")
+- mcp_xdotool_screenshot(window_name="mGBA")  -> capture the game to an IMAGE
+  (returns ONLY the image, ~0 text tokens — this replaces computer_use capture).
 
 CRITICAL — keyboard only works if the window has real focus:
 1. ALWAYS call mcp_xdotool_focus_window(name="mGBA") before pressing keys. It
@@ -29,19 +31,19 @@ CRITICAL — keyboard only works if the window has real focus:
    Do NOT skip focus_window — without it, keys are silently ignored by the
    emulator (SDL grabs the keyboard and rejects unfocused synthetic keys).
 
-## SCREENSHOTS (computer_use) — USE ONLY THIS FOR SEEING
-- Call `mcp_xdotool_focus_window(name="mGBA")` to raise the game FIRST.
-- Then `computer_use capture(mode="vision", app="mGBA")` to SEE it.
-  CRITICAL: the param order is `capture(mode=, app=)`. Passing positionally
-  `capture("mGBA", "vision")` SWAPS them (mode="mGBA", app="vision") and fails
-  with "no on-screen window matched app='vision'". Always use keywords.
-- Do this before every decision and after every action. Never capture Firefox.
+## SCREENSHOTS (xdotool MCP) — USE THIS FOR SEEING (cheap, image-only)
+- To SEE the screen, CALL mcp_xdotool_screenshot(window_name="mGBA"). It
+  returns ONLY an image — no text summary, so it costs almost no tokens.
+- DO NOT use computer_use capture for screenshots — it attaches a ~1.5k-token
+  SOM/AX summary text block per capture, which is the slow/costly path we are
+  replacing. computer_use is no longer needed for this agent.
+- Capture before every decision and after every action. Never screenshot Firefox.
 
 ## Loop (one button per turn)
 1. CALL mcp_xdotool_focus_window(name="mGBA").
-2. CALL computer_use capture(app="mGBA", mode="vision") to see the screen.
+2. CALL mcp_xdotool_screenshot(window_name="mGBA") to SEE the screen.
 3. Decide ONE button. CALL mcp_xdotool_press_key(key="...", name="mGBA").
-4. CALL capture again to confirm the screen changed.
+4. CALL mcp_xdotool_screenshot again to confirm the screen changed.
 Repeat. One button at a time — do not spam.
 
 ## Game Boy -> keyboard mapping (mGBA is already bound to these)

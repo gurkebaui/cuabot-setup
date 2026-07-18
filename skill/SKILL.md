@@ -27,8 +27,9 @@ instead. See also `computer-use-cua-driver-flatpak-fix` for the root-cause diagn
 - `mcp_xdotool_mouse_move(x, y, window_id= or name=)`.
 
 Coordinates are absolute screen pixels (3 monitors = one ~6400×1440 space).
-Every tool auto-activates the target window first (`xdotool windowactivate --sync`),
-so input always lands even on backgrounded/GL/sandboxed windows.
+Every tool auto-focuses the target window first: `focus_window` raises it AND
+does a real `mousemove`+`click` at its center (see "keyboard needs REAL focus"
+below — the click is what grants keyboard focus to SDL/Qt apps).
 
 ## Loop (e.g. playing a game)
 1. CALL `mcp_xdotool_focus_window(name="mGBA")` to raise the game FIRST.
@@ -57,9 +58,9 @@ literally "mGBA" so the filter works; the failure mode is almost always the
 swapped positional call, not a missing window.
 
 ## MCP server wiring (PITFALLS — learned the hard way)
-The server lives at `scripts/xdotool_mcp.py` (copy to
-`~/.hermes/skills/desktop-control-xdotool/xdotool_mcp.py`). Register in the
-profile `config.yaml`:
+The server is `xdotool_mcp.py` at the skill root:
+`~/.hermes/skills/desktop-control-xdotool/xdotool_mcp.py` (NOT under `scripts/`).
+Register in the profile `config.yaml`:
 ```yaml
 toolsets:
   - hermes-cli
@@ -69,7 +70,16 @@ mcp_servers:
   xdotool:
     command: python3
     args: ["/home/henry/.hermes/skills/desktop-control-xdotool/xdotool_mcp.py"]
+    env:
+      DISPLAY: ":0"
 ```
+- **`env: {DISPLAY: ":0"}` is MANDATORY.** Hermes spawns the MCP server in an
+  environment where `$DISPLAY` is STRIPPED. Without it, `xdotool` sees 0 windows
+  and `list_windows` returns `[]` — the agent reports "no mGBA window" and gives
+  up, even though the window is clearly open. The server also does
+  `os.environ.setdefault("DISPLAY", ":0")` as a belt-and-suspenders, but set the
+  config env too so it's explicit. Verified: with DISPLAY stripped, 0 windows;
+  with DISPLAY=:0, 55 windows.
 - **DO NOT pass `--toolsets mcp:xdotool` to `cuabot -z`.** The CLI `--toolsets`
   flag only accepts BUILT-IN toolsets; it rejects `mcp:xdotool` ("ignoring
   unknown --toolsets entries"). MCP servers load from `mcp_servers` in config +
@@ -77,13 +87,13 @@ mcp_servers:
 - **The `mcp` Python SDK's low-level `Server.run(read, write, ...)` HANGS on
   `tools/list`** (the agent never sees the tools). If you use the SDK, prefer
   `FastMCP`, or — bulletproof — hand-roll the JSON-RPC stdio server (no SDK
-  dependency). The shipped `scripts/xdotool_mcp.py` is hand-rolled: it reads
+  dependency). The shipped `xdotool_mcp.py` is hand-rolled: it reads
   newline-delimited JSON from stdin, dispatches `initialize` / `tools/list` /
   `tools/call`, and writes responses to stdout. This is the version that WORKS.
-- Verify the server before trusting it: `python3 scripts/test_mcp.py` should print
-  the 8 tool names + a real `list_windows` result. If Hermes reports "no MCP
-  servers connected", the server process is crashing on spawn — check it starts
-  standalone first.
+- Verify the server before trusting it: `python3 test_mcp.py` (in the skill dir)
+  should print the 8 tool names + a real `list_windows` result. If Hermes reports
+  "no MCP servers connected", the server process is crashing on spawn — check it
+  starts standalone first.
 
 ## Model-size warning
 A ~2B model (qwen3.5-2b-mtp) CANNOT reliably orchestrate 8 MCP tools + screenshots:
@@ -96,7 +106,9 @@ the bottleneck is model tool-calling competence, not the plumbing.
 `flatpak run --env=QT_OPENGL=software --env=LIBGL_ALWAYS_SOFTWARE=1 io.mgba.mGBA <rom>`
 
 ## Support files
-- `scripts/xdotool_mcp.py` — the working hand-rolled MCP server (proven).
-- `scripts/test_mcp.py` — stdio handshake test (initialize → tools/list → call).
+- `xdotool_mcp.py` — the working hand-rolled MCP server (proven). At skill root,
+  NOT under `scripts/`.
 - `references/setup-and-gotchas.md` — full reproduction recipe, param-order trap,
-  MCP registration gotcha, model-size note, pixel-diff verification probe.
+  MCP registration gotcha, DISPLAY-strip pitfall, model-size note, pixel-diff probe.
+- Backup repo (rollback): `gurkebaui/cuabot-setup` on GitHub — full
+  `cua_backend.py` patch, cuabot profile (config+SOUL.md), and this server + README.
