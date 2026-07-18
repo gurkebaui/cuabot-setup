@@ -428,7 +428,12 @@ def _to_global(x, y, name, window_id):
 # Longest-side cap for screenshots (keeps the image tiny in context = fast).
 SHOT_MAX_SIDE = 854
 
-_PRIMARY = None  # cached (x, y, w, h) of the primary monitor in global space
+_PRIMARY = None  # cached (x, y, w, h) of the target monitor in global space
+# Target monitor for screenshot(window_name="primary") / click(name="primary").
+# Override with env CUABOT_MONITOR (a connector name like "DP-2", or "primary"
+# to use xrandr's primary flag). The xrandr "primary" flag is NOT always the
+# monitor the user actually looks at, so this override exists for that case.
+_TARGET_MONITOR = os.environ.get("CUABOT_MONITOR", "primary").strip() or "primary"
 # Coordinate mapping from the most recent screenshot, so the model can click
 # using the coords it SAW without passing an explicit name. Set by
 # screenshot()/screenshot_around_cursor(): {"ox","oy","sx","sy"} where
@@ -438,15 +443,30 @@ STATE = {"map": None}
 
 
 def _primary_monitor():
-    """Return the primary monitor's global rect (x, y, w, h), cached.
-    Parsed from `xrandr` (the monitor tagged 'primary')."""
+    """Return the TARGET monitor's global rect (x, y, w, h), cached.
+
+    The target is _TARGET_MONITOR: an xrandr connector name (e.g. "DP-2") or
+    "primary" (xrandr's primary flag). The primary flag is not always the
+    monitor the user looks at, so CUABOT_MONITOR env lets Henry point at the
+    real one without code changes."""
     global _PRIMARY
     if _PRIMARY:
         return _PRIMARY
     try:
         out = subprocess.run(["xrandr", "--query"],
                              capture_output=True, text=True, timeout=10).stdout
-        for ln in out.splitlines():
+        lines = out.splitlines()
+        if _TARGET_MONITOR.lower() != "primary":
+            # match an explicit connector, e.g. "DP-2 connected ..."
+            for ln in lines:
+                if ln.startswith(_TARGET_MONITOR + " ") or ln.startswith(_TARGET_MONITOR + "\t"):
+                    m = re.search(r"(\d+)x(\d+)\+(\d+)\+(\d+)", ln)
+                    if m:
+                        w, h, x, y = (int(g) for g in m.groups())
+                        _PRIMARY = (x, y, w, h)
+                        return _PRIMARY
+            # fall through to primary if connector not found
+        for ln in lines:
             if "primary" in ln:
                 # e.g. "HDMI-1 connected primary 2560x1440+1920+0 (...)"
                 m = re.search(r"(\d+)x(\d+)\+(\d+)\+(\d+)", ln)

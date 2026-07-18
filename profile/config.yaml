@@ -11,7 +11,7 @@ custom_providers:
     api_key: lmstudio
     api_mode: chat_completions
     models:
-      - qwen3.5-9b-mtp
+      - gemma-4-12b-qat
     discover_models: true
 toolsets:
   - hermes-cli
@@ -25,6 +25,11 @@ mcp_servers:
       - /home/henry/.hermes/skills/desktop-control-xdotool/xdotool_mcp.py
     env:
       DISPLAY: :0
+      # Which monitor screenshot(window_name="primary") / click(name="primary")
+      # target. xrandr's "primary" flag (HDMI-1) is NOT Henry's real main screen
+      # — his cursor/windows live on DP-2 (1920x1080 at +4480+360). Override the
+      # connector here if the wrong monitor shows up. "primary" = xrandr flag.
+      CUABOT_MONITOR: DP-2
 agent:
   max_turns: 90
   gateway_timeout: 1800
@@ -34,13 +39,13 @@ agent:
 auxiliary:
   vision:
     provider: lmstudio
-    model: qwen3.5-9b-mtp
+    model: gemma-4-12b-qat
     base_url: http://localhost:1234/v1
     api_key: lmstudio
     timeout: 300
     context_length: 90000
   compression:
-    model: qwen3.5-9b-mtp
+    model: gemma-4-12b-qat
     context_length: 90000
 onboarding:
   seen:
