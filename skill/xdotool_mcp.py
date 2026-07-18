@@ -85,23 +85,50 @@ def _activate(wid: int) -> None:
 
 
 def _find_window(name: str):
+    """Forgiving window lookup: case-insensitive CONTAINS match across all
+    visible windows (not exact). Returns (window_id, title) or (None, None).
+    Used only as an OPTIONAL hint — input works globally without a match."""
+    if not name:
+        return None, None
     try:
-        out = subprocess.run(["xdotool", "search", "--onlyvisible", "--name", name],
-                              capture_output=True, text=True, timeout=10)
+        out = subprocess.run(["xdotool", "search", "--onlyvisible", "--name", ""],
+                             capture_output=True, text=True, timeout=10)
         wids = [w for w in out.stdout.split() if w.strip().isdigit()]
+        rows = []
         for wid in wids:
             t = subprocess.run(["xdotool", "getwindowname", wid],
                                capture_output=True, text=True, timeout=5).stdout.strip()
-            if name.lower() in t.lower():
-                return int(wid), t
-        if wids:
-            wid = wids[0]
-            t = subprocess.run(["xdotool", "getwindowname", wid],
-                               capture_output=True, text=True, timeout=5).stdout.strip()
-            return int(wid), t
+            if t:
+                rows.append((int(wid), t))
+        # prefer a contains-match on the name
+        needle = name.lower()
+        for wid, t in rows:
+            if needle in t.lower():
+                return wid, t
+        # fallback: any window whose title shares a token with the query
+        for wid, t in rows:
+            if any(tok in t.lower() for tok in needle.split() if len(tok) > 2):
+                return wid, t
     except Exception:
         pass
     return None, None
+
+
+def _available_titles():
+    """List visible window titles — used to build helpful 'no match' errors."""
+    try:
+        out = subprocess.run(["xdotool", "search", "--onlyvisible", "--name", ""],
+                             capture_output=True, text=True, timeout=10)
+        wids = [w for w in out.stdout.split() if w.strip().isdigit()]
+        titles = []
+        for wid in wids:
+            t = subprocess.run(["xdotool", "getwindowname", wid],
+                               capture_output=True, text=True, timeout=5).stdout.strip()
+            if t:
+                titles.append(t)
+        return titles
+    except Exception:
+        return []
 
 
 def _run(args):
@@ -129,93 +156,111 @@ def list_windows():
 
 
 def focus_window(name):
+    """OPTIONAL helper: raise a window and click it to give it true X keyboard
+    focus (needed only for apps that grab the keyboard, e.g. mGBA's SDL).
+    Input works GLOBALLY without this — but focusing mGBA first makes its
+    game keys register reliably. Forgiving contains-match on the name."""
     wid, title = _find_window(name)
     if wid is None:
-        return {"ok": False, "error": f"no window matching '{name}'"}
+        titles = _available_titles()
+        return {"ok": False,
+                "error": f"no window matching '{name}'.",
+                "available_windows": titles}
     _activate(wid)
     return {"ok": True, "window_id": wid, "title": title}
 
 
 def press_key(key, window_id=None, name=None):
-    if window_id is None and name:
-        window_id, _ = _find_window(name)
-    if window_id is None:
-        return {"ok": False, "error": "no window_id or matching name"}
-    _activate(window_id)
-    # Send GLOBALLY (no --window) so the key routes through the normal X focus
-    # path to the frontmost window. Sending --window is ignored by SDL/Qt apps
-    # that grab the keyboard (mGBA). A prior real click gave it true focus.
+    """Send ONE key GLOBALLY (to whatever window is focused). Works WITHOUT a
+    focused/target window. If `name` is given, focus that window first (helps
+    SDL-grabbing apps like mGBA), but the key is still sent globally."""
+    if name and window_id is None:
+        wid, _ = _find_window(name)
+        if wid is not None:
+            _activate(wid)
+    elif window_id:
+        _activate(window_id)
     ok, err = _run(["xdotool", "key", _keysym(key)])
-    return {"ok": ok, "key": key, "window_id": window_id, "error": err}
+    return {"ok": ok, "key": key, "error": err}
 
 
 def type_text(text, window_id=None, name=None):
-    if window_id is None and name:
-        window_id, _ = _find_window(name)
-    if window_id is None:
-        return {"ok": False, "error": "no window_id or matching name"}
-    _activate(window_id)
+    """Type text GLOBALLY (no window required). If `name` given, focus first."""
+    if name and window_id is None:
+        wid, _ = _find_window(name)
+        if wid is not None:
+            _activate(wid)
+    elif window_id:
+        _activate(window_id)
     ok, err = _run(["xdotool", "type", "--delay", "0", text])
-    return {"ok": ok, "chars": len(text), "window_id": window_id, "error": err}
+    return {"ok": ok, "chars": len(text), "error": err}
 
 
 def click(x, y, button="left", count=1, window_id=None, name=None):
-    if window_id is None and name:
-        window_id, _ = _find_window(name)
-    if window_id is None:
-        return {"ok": False, "error": "no window_id or matching name"}
-    _activate(window_id)
+    """Click at SCREEN coordinates (x, y) — GLOBAL, no window needed.
+    If `name` given, focus that window first (so the click lands in it)."""
+    if name and window_id is None:
+        wid, _ = _find_window(name)
+        if wid is not None:
+            _activate(wid)
+    elif window_id:
+        _activate(window_id)
     btn = _btn(button)
-    _run(["xdotool", "mousemove", "--window", str(window_id), str(x), str(y)])
+    _run(["xdotool", "mousemove", str(x), str(y)])
     for _ in range(max(1, count)):
-        ok, err = _run(["xdotool", "click", "--window", str(window_id), btn])
+        ok, err = _run(["xdotool", "click", btn])
         if not ok:
             return {"ok": False, "error": err}
-    return {"ok": True, "x": x, "y": y, "button": button, "window_id": window_id}
+    return {"ok": True, "x": x, "y": y, "button": button}
 
 
 def drag(x1, y1, x2, y2, button="left", window_id=None, name=None):
-    if window_id is None and name:
-        window_id, _ = _find_window(name)
-    if window_id is None:
-        return {"ok": False, "error": "no window_id or matching name"}
-    _activate(window_id)
+    """Drag between SCREEN coordinates — GLOBAL. If `name` given, focus first."""
+    if name and window_id is None:
+        wid, _ = _find_window(name)
+        if wid is not None:
+            _activate(wid)
+    elif window_id:
+        _activate(window_id)
     btn = _btn(button)
-    _run(["xdotool", "mousemove", "--window", str(window_id), str(x1), str(y1)])
-    _run(["xdotool", "mousedown", "--window", str(window_id), btn])
+    _run(["xdotool", "mousemove", str(x1), str(y1)])
+    _run(["xdotool", "mousedown", btn])
     steps = max(2, min(20, abs(x2 - x1) + abs(y2 - y1) // 20))
     for i in range(1, steps + 1):
         ix = x1 + (x2 - x1) * i // steps
         iy = y1 + (y2 - y1) * i // steps
-        _run(["xdotool", "mousemove", "--window", str(window_id), str(ix), str(iy)])
-    _run(["xdotool", "mouseup", "--window", str(window_id), btn])
-    return {"ok": True, "from": [x1, y1], "to": [x2, y2], "window_id": window_id}
+        _run(["xdotool", "mousemove", str(ix), str(iy)])
+    _run(["xdotool", "mouseup", btn])
+    return {"ok": True, "from": [x1, y1], "to": [x2, y2]}
 
 
 def scroll(x, y, direction="up", amount=3, window_id=None, name=None):
-    if window_id is None and name:
-        window_id, _ = _find_window(name)
-    if window_id is None:
-        return {"ok": False, "error": "no window_id or matching name"}
-    _activate(window_id)
+    """Scroll at SCREEN coordinates (x, y) — GLOBAL. If `name` given, focus first."""
+    if name and window_id is None:
+        wid, _ = _find_window(name)
+        if wid is not None:
+            _activate(wid)
+    elif window_id:
+        _activate(window_id)
     btn = "4" if (direction or "").lower() in ("up", "left") else "5"
-    _run(["xdotool", "mousemove", "--window", str(window_id), str(x), str(y)])
+    _run(["xdotool", "mousemove", str(x), str(y)])
     for _ in range(max(1, min(50, amount))):
-        ok, err = _run(["xdotool", "click", "--window", str(window_id), btn])
+        ok, err = _run(["xdotool", "click", btn])
         if not ok:
             return {"ok": False, "error": err}
-    return {"ok": True, "x": x, "y": y, "direction": direction,
-            "amount": amount, "window_id": window_id}
+    return {"ok": True, "x": x, "y": y, "direction": direction, "amount": amount}
 
 
 def mouse_move(x, y, window_id=None, name=None):
-    if window_id is None and name:
-        window_id, _ = _find_window(name)
-    if window_id is None:
-        return {"ok": False, "error": "no window_id or matching name"}
-    _activate(window_id)
-    ok, err = _run(["xdotool", "mousemove", "--window", str(window_id), str(x), str(y)])
-    return {"ok": ok, "x": x, "y": y, "window_id": window_id, "error": err}
+    """Move the real cursor to SCREEN coordinates (x, y) — GLOBAL."""
+    if name and window_id is None:
+        wid, _ = _find_window(name)
+        if wid is not None:
+            _activate(wid)
+    elif window_id:
+        _activate(window_id)
+    ok, err = _run(["xdotool", "mousemove", str(x), str(y)])
+    return {"ok": ok, "x": x, "y": y, "error": err}
 
 
 def screenshot(window_name=None):
