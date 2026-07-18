@@ -747,12 +747,9 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "x": {"type": "integer"}, "y": {"type": "integer"}, "direction": {"type": "string", "default": "up"},
          "amount": {"type": "integer", "default": 3}, "window_id": {"type": "integer"}, "name": {"type": "string"}}}},
-    {"name": "mouse_move", "description": "Move the real cursor to SCREEN (x,y) via xdotool (correct global multi-monitor coords).",
+    {"name": "mouse_move", "description": "Move the real cursor to coords from a screenshot; translated to global. name=\"primary\" uses the downscaled primary-monitor screenshot coords.",
      "inputSchema": {"type": "object", "properties": {
          "x": {"type": "integer"}, "y": {"type": "integer"}, "window_id": {"type": "integer"}, "name": {"type": "string"}}}},
-    {"name": "screenshot", "description": "Capture a window to an image (returns ONLY the image, no text — cheap). window_name: capture that window (e.g. 'mGBA'); if omitted, capture the focused window. Use this instead of computer_use capture to save tokens.",
-     "inputSchema": {"type": "object", "properties": {
-         "window_name": {"type": "string"}}}},
 ]
 
 
