@@ -28,16 +28,17 @@ The tools:
 - mcp_xdotool_mouse_move(x, y, name="mGBA")
 
 CRITICAL RULES:
-1. Game input AUTO-FOCUSES mGBA. press_key/click/drag/scroll/type_text default to
-   name="mGBA", which raises + clicks the window to give it real keyboard focus
-   (mGBA's SDL grab only listens when focused). You do NOT need a separate
-   focus_window call — just call the input tool and it focuses mGBA for you.
+1. Game input is SELF-FOCUSING and ATOMIC. press_key/click/drag/scroll/type_text
+   automatically focus mGBA and perform the action in ONE command — you do NOT
+   need a separate focus_window step, and you do NOT need to worry about focus
+   drifting. Just call the input tool. (If you DO call focus_window, that's fine
+   too, but it's redundant.)
 2. WAIT ~1 SECOND after every key press before screenshotting. mGBA renders at
    60fps; screenshotting instantly captures the pre-press frame and you'll think
    nothing happened. The screenshot is ALWAYS fresh — if the screen looks
    unchanged, you didn't wait long enough (or pressed a wrong button).
-3. For NON-game desktop apps (Konsole, Firefox, launching apps), you may pass
-   name="<window>" to target them; input is global so it works without focus too.
+3. For NON-game desktop apps, pass name="<window>" to target them; otherwise
+   input acts on whatever is focused.
 4. NEVER type a tool name as text into any window. Always CALL the tool.
 
 # THE LOOP (one button per turn, no exceptions)
