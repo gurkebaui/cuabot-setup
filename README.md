@@ -4,28 +4,40 @@ Backup of Henry's desktop-control game agent ("cuabot") built on Hermes Agent
 + a hand-rolled MCP server that drives mGBA's GBA input from INSIDE the emulator.
 
 ## The core idea (and why it's robust)
-To play a GAME in an emulator, you don't need OS-level input injection at all.
-mGBA 0.10.x ships **Lua scripting** (liblua + LuaSocket). A small Lua script
-(`mgba_agent.lua`) runs INSIDE mGBA, opens a TCP socket on `127.0.0.1:8930`, and
-drives the GBA buttons via mGBA's own `emu:setKeys(bitmask)` API.
+Three input paths, each chosen for what it does best:
 
-The MCP server's `press_key(name="mGBA")` connects to that socket and sends the
-button. This is:
-- **Not** xdotool (synthetic X keys are REJECTED by mGBA's SDL/Qt input grab).
-- **Not** ydotool (needs a kernel uinput bridge to X that wasn't wired up).
-- **Not** dependent on window focus. Input goes straight into the emulator.
-=> It just works, every time.
+1. **mGBA game buttons → emulator-internal Lua socket.** `mgba_agent.lua`
+   runs INSIDE mGBA, opens a TCP socket on `127.0.0.1:8930`, and drives the GBA
+   buttons via `emu:setKeys(bitmask)`. No OS input at all — can't be rejected.
+   This is the only path that reliably controls mGBA (xdotool/ydotool synthetic
+   keys are rejected by mGBA's SDL/Qt input grab).
+
+2. **Keyboard on ANY other window → ydotool (kernel uinput).** ydotool injects
+   real input events at the kernel level, so SDL/Qt grabs CANNOT reject them
+   (unlike xdotool). Works on flatpak/sandboxed apps too. Requires `ydotoold`
+   running and `/dev/uinput` accessible (henry in `input` group). After
+   installing, `sudo udevadm trigger` makes X bind the virtual device.
+
+3. **Mouse on ANY window → xdotool (global coords).** xdotool `mousemove` uses
+   correct GLOBAL multi-monitor coordinates. The screenshot tool returns
+   WINDOW-LOCAL pixels, so the MCP server translates local→global via the
+   window geometry before moving. (ydotool absolute coords are pinned to one
+   monitor with an offset, so xdotool is used for the pointer; ydotool is
+   reserved for keyboard.)
 
 ## Why the previous approaches failed (lessons learned)
 - cua-driver routes input by **pid**; flatpak's bwrap sandbox reports pid=2, so
   keystrokes are silently dropped on mGBA. Dead end.
 - xdotool synthetic keys: PROVEN rejected by mGBA even with correct focus and
-  correct key bindings (Down/x/Return/raw keycode all did nothing). Dead end.
-- ydotool (kernel uinput): rc=0 but X11 never attached the virtual device
-  (no xinput/evdev seat bridge), so no app received events. Blocked without
-  sudo + X plumbing. Dead end.
-- Emulator-internal Lua socket: inputs the emulator's own button state. The
-  only approach that can't be rejected. THIS is the one.
+  correct key bindings. Dead end for the game.
+- ydotool (kernel uinput) for the GAME: needs X to bind the virtual device;
+  works for keyboard once `udevadm trigger` is done, but its absolute mouse
+  coords are monitor-pinned — so mouse uses xdotool instead.
+
+## Known issues
+- **mGBA d-pad LEFT/RIGHT are inverted** in `mgba_agent.lua` — swap bits 4/5
+  (LEFT/RIGHT) in the button mapping to fix. Low priority (game mostly needs
+  A/START/dpad-up/down).
 
 ## Files
 - `skill/mgba_agent.lua`           The Lua control server. Load ONCE into mGBA

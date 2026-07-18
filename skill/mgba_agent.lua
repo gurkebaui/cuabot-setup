@@ -14,10 +14,13 @@
 -- Buttons: A B SELECT START LEFT RIGHT UP DOWN R L  (case-insensitive)
 -- Also accepts combined holds like "HOLD A START".
 
--- GBA key bit positions (must match mGBA's KEY_NAMES order)
+-- GBA key bit positions (must match mGBA's KEY_NAMES order).
+-- NOTE: LEFT/RIGHT bits are intentionally SWAPPED vs the nominal mGBA order
+-- because on this setup pressing "left" moved the character right (inverted
+-- d-pad). If it ever looks correct again, swap these two back.
 local KEY_BITS = {
     A = 1 << 0, B = 1 << 1, SELECT = 1 << 2, START = 1 << 3,
-    LEFT = 1 << 4, RIGHT = 1 << 5, UP = 1 << 6, DOWN = 1 << 7,
+    LEFT = 1 << 5, RIGHT = 1 << 4, UP = 1 << 6, DOWN = 1 << 7,
     R = 1 << 8, L = 1 << 9,
 }
 local KEY_ALIASES = { S = "START", s = "SELECT", ["^"] = "UP", v = "DOWN",
