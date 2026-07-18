@@ -105,6 +105,127 @@ def _mgba_socket_up():
     return r is not None and not str(r).startswith("ERR")
 
 
+# ---------------------------------------------------------------------------
+# ydotool input (real kernel-level input; works on ANY X11 window incl. flatpak)
+# ---------------------------------------------------------------------------
+# ydotool injects via /dev/uinput, so SDL/Qt keyboard grabs CANNOT reject it
+# (unlike xdotool). Keys are RAW Linux keycodes (linux/input-event-codes.h);
+# the daemon (ydotoold) holds device state across calls, so a drag can press
+# in one call and release in a later call.
+_LINUX_KEYCODE = {
+    "escape": 1, "esc": 1,
+    "1": 2, "2": 3, "3": 4, "4": 5, "5": 6, "6": 7, "7": 8, "8": 9, "9": 10, "0": 11,
+    "-": 12, "=": 13, "minus": 12, "equal": 13,
+    "backspace": 14,
+    "tab": 15,
+    "q": 16, "w": 17, "e": 18, "r": 19, "t": 20, "y": 21, "u": 22, "i": 23,
+    "o": 24, "p": 25,
+    "[": 26, "]": 27, "bracketleft": 26, "bracketright": 27,
+    "enter": 28, "return": 28, "ret": 28,
+    "ctrl": 29, "lctrl": 29, "leftctrl": 29, "control": 29, "rctrl": 97,
+    "rightctrl": 97,
+    "a": 30, "s": 31, "d": 32, "f": 33, "g": 34, "h": 35, "j": 36, "k": 37, "l": 38,
+    ";": 39, "semicolon": 39, "'": 40, "apostrophe": 40, "`": 41, "grave": 41,
+    "shift": 42, "lshift": 42, "leftshift": 42, "rshift": 54, "rightshift": 54,
+    "\\": 43, "backslash": 43,
+    "z": 44, "x": 45, "c": 46, "v": 47, "b": 48, "n": 49, "m": 50,
+    ",": 51, "comma": 51, ".": 52, "dot": 52, "/": 53, "slash": 53,
+    "alt": 56, "lalt": 56, "leftalt": 56, "ralt": 100, "rightalt": 100,
+    "space": 57, " ": 57,
+    "capslock": 58,
+    "f1": 59, "f2": 60, "f3": 61, "f4": 62, "f5": 63, "f6": 64, "f7": 65,
+    "f8": 66, "f9": 67, "f10": 68, "f11": 87, "f12": 88,
+    "home": 102, "up": 103, "pageup": 104, "pgup": 104,
+    "left": 105, "right": 106, "end": 107, "down": 108, "pagedown": 109,
+    "pgdn": 109, "insert": 110, "ins": 110, "delete": 111, "del": 111,
+    "win": 125, "super": 125, "meta": 125,
+}
+
+
+def _has_ydotool() -> bool:
+    return shutil.which("ydotool") is not None
+
+
+def _ydotool_key_seq(parts):
+    """parts: list of key names; emit press+release for each (combined = held
+    chord). Returns (ok, err)."""
+    seq = []
+    for name in parts:
+        code = _LINUX_KEYCODE.get(str(name).lower())
+        if code is None:
+            return False, f"unknown key '{name}'"
+        seq.append(f"{code}:1")
+        seq.append(f"{code}:0")
+    if not seq:
+        return False, "empty key sequence"
+    ok, err = _run(["ydotool", "key"] + seq)
+    return ok, err
+
+
+def ydotool_press(key):
+    """Press ONE key (or a chord like 'ctrl+c') via ydotool real input."""
+    k = str(key).strip()
+    if "+" in k:
+        parts = [p.strip() for p in k.split("+")]
+        ok, err = _ydotool_key_seq(parts)
+        return {"ok": ok, "key": key, "method": "ydotool", "error": err}
+    if k.lower() in _LINUX_KEYCODE:
+        ok, err = _ydotool_key_seq([k])
+        return {"ok": ok, "key": key, "method": "ydotool", "error": err}
+    # single character -> let ydotool type handle shift/caps
+    if len(k) == 1:
+        ok, err = _run(["ydotool", "type", k])
+        return {"ok": ok, "key": key, "method": "ydotool", "error": err}
+    return {"ok": False, "error": f"unknown key '{key}'"}
+
+
+def ydotool_type(text):
+    """Type a string via ydotool (handles shift/caps internally)."""
+    ok, err = _run(["ydotool", "type", str(text)])
+    return {"ok": ok, "text": text, "method": "ydotool", "error": err}
+
+
+_BUTTON_HEX = {"left": "0x00", "right": "0x01", "middle": "0x02",
+               "1": "0x00", "2": "0x01", "3": "0x02"}
+
+
+def ydotool_click(x, y, button="left"):
+    btn = _BUTTON_HEX.get(str(button).lower(), "0x00")
+    ok1, err1 = _run(["ydotool", "mousemove", "-a", "-x", str(x), "-y", str(y)])
+    ok2, err2 = _run(["ydotool", "click", btn])
+    return {"ok": ok1 and ok2, "x": x, "y": y, "button": button,
+            "method": "ydotool", "error": err1 or err2}
+
+
+def ydotool_move(x, y):
+    ok, err = _run(["ydotool", "mousemove", "-a", "-x", str(x), "-y", str(y)])
+    return {"ok": ok, "x": x, "y": y, "method": "ydotool", "error": err}
+
+
+def ydotool_scroll(x, y, direction="up", amount=3):
+    # move to position, then wheel: down = positive y, up = negative y
+    dy = amount if direction.lower() in ("down", "wheeldown") else -amount
+    ok1, err1 = _run(["ydotool", "mousemove", "-a", "-x", str(x), "-y", str(y)])
+    ok2, err2 = _run(["ydotool", "mousemove", "-w", "-y", str(dy)])
+    return {"ok": ok1 and ok2, "x": x, "y": y, "direction": direction,
+            "amount": amount, "method": "ydotool", "error": err1 or err2}
+
+
+def ydotool_drag(x1, y1, x2, y2, button="left"):
+    """Drag: move to start, press (hold), move to end, release.
+    ydotoold holds button state across calls, so we omit the UP on press
+    (mask 0x40) and omit the DOWN on release (mask 0x80)."""
+    b = _BUTTON_HEX.get(str(button).lower(), "0x00")
+    down = f"0x{(int(b,16) | 0x40):02x}"   # omit UP -> hold
+    up = f"0x{(int(b,16) | 0x80):02x}"     # omit DOWN -> release
+    ok1, err1 = _run(["ydotool", "mousemove", "-a", "-x", str(x1), "-y", str(y1)])
+    ok2, err2 = _run(["ydotool", "click", down])
+    ok3, err3 = _run(["ydotool", "mousemove", "-a", "-x", str(x2), "-y", str(y2)])
+    ok4, err4 = _run(["ydotool", "click", up])
+    return {"ok": all([ok1, ok2, ok3, ok4]), "from": (x1, y1), "to": (x2, y2),
+            "method": "ydotool", "error": err1 or err2 or err3 or err4}
+
+
 def _keysym(name: str) -> str:
     v = (name or "").lower()
     if v in ("up", "down", "left", "right"):
@@ -282,6 +403,27 @@ def _resolve_wid(window_id=None, name="mGBA"):
     return None
 
 
+def _to_global(x, y, name, window_id):
+    """Translate WINDOW-LOCAL screenshot coords (what the model sees) to GLOBAL
+    X screen coords. xdotool mousemove is global, but the screenshot tool
+    returns window-local pixels, so we must add the window's top-left offset."""
+    wid = _resolve_wid(window_id, name)
+    if wid is None:
+        return x, y
+    try:
+        geo = subprocess.run(["xdotool", "getwindowgeometry", "--shell", str(wid)],
+                             capture_output=True, text=True, timeout=10).stdout
+        gx = gy = 0
+        for ln in geo.splitlines():
+            if ln.startswith("X="):
+                gx = int(ln.split("=")[1])
+            elif ln.startswith("Y="):
+                gy = int(ln.split("=")[1])
+        return gx + x, gy + y
+    except Exception:
+        return x, y
+
+
 def press_key(key, window_id=None, name="mGBA"):
     """Send ONE key. For mGBA this goes through the emulator-internal Lua socket
     (emu:setKeys) which is the only reliable path (xdotool/ydotool synthetic keys
@@ -292,16 +434,14 @@ def press_key(key, window_id=None, name="mGBA"):
         btn = _map_to_gba_button(key)
         if btn:
             return mgba_press(btn, "PRESS")
-        # not a GBA button name; fall back to OS input for mGBA's own menus etc.
-    # non-mGBA or unknown button: OS input (ydotool if available, else xdotool)
+        # not a GBA button name; fall through to ydotool for mGBA's own menus
+    # non-mGBA (or unknown GBA button): use ydotool real kernel input.
+    # ydotool works on ANY window (incl. flatpak) because it injects at the
+    # kernel uinput layer — SDL/Qt grabs can't reject it (unlike xdotool).
+    if _has_ydotool():
+        return ydotool_press(key)
+    # last-resort fallback: xdotool
     wid = _resolve_wid(window_id, name)
-    if shutil.which("ydotool") and _mgba_socket_up() is False:
-        if wid:
-            ok, err = _run(["ydotool", "key", _keysym(key)])
-        else:
-            ok, err = _run(["ydotool", "key", _keysym(key)])
-        if ok:
-            return {"ok": ok, "key": key, "method": "ydotool", "error": err}
     if wid:
         ok, err = _run(["xdotool", "windowactivate", "--sync", str(wid),
                         "key", _keysym(key)])
@@ -323,7 +463,13 @@ def _map_to_gba_button(key):
 
 
 def type_text(text, window_id=None, name="mGBA"):
-    """Type text. Atomic focus+type in one command (see press_key)."""
+    """Type text. For mGBA, typing is not meaningful (game uses buttons). For
+    other windows, use ydotool real input (works on any window incl. flatpak)."""
+    if name and name.lower() in ("mgba", "mGBA", "pokemon"):
+        return {"ok": False, "error": "typing is not meaningful for mGBA (use buttons)"}
+    if _has_ydotool():
+        return ydotool_type(text)
+    # fallback: xdotool
     wid = _resolve_wid(window_id, name)
     if wid:
         ok, err = _run(["xdotool", "windowactivate", "--sync", str(wid),
@@ -334,64 +480,71 @@ def type_text(text, window_id=None, name="mGBA"):
 
 
 def click(x, y, button="left", count=1, window_id=None, name="mGBA"):
-    """Click at SCREEN coords. Atomic: focus + move + click in one command so the
-    click always lands in the intended window. `count` repeats the click."""
+    """Click at WINDOW-LOCAL (x,y) from a screenshot; translated to global
+    coords. Mouse uses xdotool (correct global multi-monitor coords)."""
+    gx, gy = _to_global(x, y, name, window_id)
     btn = _btn(button)
     wid = _resolve_wid(window_id, name)
     if wid:
         cmd = ["xdotool", "windowactivate", "--sync", str(wid),
-               "mousemove", str(x), str(y)]
+               "mousemove", str(gx), str(gy)]
     else:
-        cmd = ["xdotool", "mousemove", str(x), str(y)]
+        cmd = ["xdotool", "mousemove", str(gx), str(gy)]
     for _ in range(max(1, count)):
         ok, err = _run(cmd + ["click", btn])
         if not ok:
             return {"ok": False, "error": err}
-    return {"ok": True, "x": x, "y": y, "button": button}
+    return {"ok": True, "x": x, "y": y, "global": [gx, gy], "button": button}
 
 
 def drag(x1, y1, x2, y2, button="left", window_id=None, name="mGBA"):
-    """Drag between SCREEN coords. Atomic focus+move+down+move+up in one command."""
+    """Drag between WINDOW-LOCAL coords (screenshot space); translated to global."""
+    gx1, gy1 = _to_global(x1, y1, name, window_id)
+    gx2, gy2 = _to_global(x2, y2, name, window_id)
     btn = _btn(button)
     wid = _resolve_wid(window_id, name)
-    steps = max(2, min(20, abs(x2 - x1) + abs(y2 - y1) // 20))
+    steps = max(2, min(20, abs(gx2 - gx1) + abs(gy2 - gy1) // 20))
     cmd = ["xdotool"]
     if wid:
         cmd += ["windowactivate", "--sync", str(wid)]
-    cmd += ["mousemove", str(x1), str(y1), "mousedown", btn]
+    cmd += ["mousemove", str(gx1), str(gy1), "mousedown", btn]
     for i in range(1, steps + 1):
-        ix = x1 + (x2 - x1) * i // steps
-        iy = y1 + (y2 - y1) * i // steps
+        ix = gx1 + (gx2 - gx1) * i // steps
+        iy = gy1 + (gy2 - gy1) * i // steps
         cmd += ["mousemove", str(ix), str(iy)]
     cmd += ["mouseup", btn]
     ok, err = _run(cmd)
-    return {"ok": ok, "from": [x1, y1], "to": [x2, y2], "error": err}
+    return {"ok": ok, "from": [x1, y1], "to": [x2, y2],
+            "global_from": [gx1, gy1], "global_to": [gx2, gy2], "error": err}
 
 
 def scroll(x, y, direction="up", amount=3, window_id=None, name="mGBA"):
-    """Scroll at SCREEN coords. Atomic focus+move+click(repeat) in one command."""
+    """Scroll at WINDOW-LOCAL (x,y) from a screenshot; translated to global."""
+    gx, gy = _to_global(x, y, name, window_id)
     btn = "4" if (direction or "").lower() in ("up", "left") else "5"
     wid = _resolve_wid(window_id, name)
     for _ in range(max(1, min(50, amount))):
         if wid:
             ok, err = _run(["xdotool", "windowactivate", "--sync", str(wid),
-                            "mousemove", str(x), str(y), "click", btn])
+                            "mousemove", str(gx), str(gy), "click", btn])
         else:
-            ok, err = _run(["xdotool", "mousemove", str(x), str(y), "click", btn])
+            ok, err = _run(["xdotool", "mousemove", str(gx), str(gy), "click", btn])
         if not ok:
             return {"ok": False, "error": err}
-    return {"ok": True, "x": x, "y": y, "direction": direction, "amount": amount}
+    return {"ok": True, "x": x, "y": y, "global": [gx, gy], "direction": direction, "amount": amount}
 
 
 def mouse_move(x, y, window_id=None, name="mGBA"):
-    """Move the real cursor to SCREEN coords. Atomic focus+move in one command."""
+    """Move the real cursor to WINDOW-LOCAL (x,y) from a screenshot; translated
+    to global coords via xdotool (correct global multi-monitor coords)."""
+    gx, gy = _to_global(x, y, name, window_id)
     wid = _resolve_wid(window_id, name)
     if wid:
         ok, err = _run(["xdotool", "windowactivate", "--sync", str(wid),
-                        "mousemove", str(x), str(y)])
+                        "mousemove", str(gx), str(gy)])
     else:
-        ok, err = _run(["xdotool", "mousemove", str(x), str(y)])
-    return {"ok": ok, "x": x, "y": y, "error": err}
+        ok, err = _run(["xdotool", "mousemove", str(gx), str(gy)])
+    return {"ok": ok, "x": x, "y": y, "global": [gx, gy], "error": err}
 
 
 def screenshot(window_name=None):
@@ -470,29 +623,29 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "focus_window", "description": "Raise + focus a window by title substring; returns window_id.",
      "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}}}},
-    {"name": "press_key", "description": "Send ONE key. For mGBA this drives the emulator's GBA buttons via its internal Lua socket (reliable). Keys: a/x (A button), b/y (B), return/start (START), backspace (SELECT), up/down/left/right (dpad). Also works as global xdotool/ydotool for other apps.",
+    {"name": "press_key", "description": "Send ONE key (or chord like 'ctrl+c'). For mGBA this drives the emulator's GBA buttons via its internal Lua socket (reliable). For ALL other windows it uses ydotool REAL kernel input (works on any app, incl. flatpak/sandboxed). Keys: letters a-z, digits, return/enter, backspace, tab, space, up/down/left/right, escape, ctrl+..., shift+..., alt+....",
      "inputSchema": {"type": "object", "properties": {
          "key": {"type": "string"}, "window_id": {"type": "integer"}, "name": {"type": "string", "default": "mGBA"}}}},
     {"name": "mgba_press", "description": "Press a GBA button INSIDE mGBA via the emulator's Lua socket (emu:setKeys). Most reliable input for mGBA. button: A/B/START/SELECT/UP/DOWN/LEFT/RIGHT. action: PRESS (tap) | HOLD | REL.",
      "inputSchema": {"type": "object", "properties": {
          "button": {"type": "string"}, "action": {"type": "string", "default": "PRESS"}}}},
-    {"name": "type_text", "description": "Type text into a window via xdotool.",
+    {"name": "type_text", "description": "Type a string into a window via ydotool real input (works on any window incl. flatpak). Not meaningful for mGBA (game uses buttons).",
      "inputSchema": {"type": "object", "properties": {
          "text": {"type": "string"}, "window_id": {"type": "integer"}, "name": {"type": "string"}}}},
-    {"name": "click", "description": "Move real cursor to (x,y) and click. button: left/right/middle.",
+    {"name": "click", "description": "Move real cursor to SCREEN (x,y) and click via xdotool (correct global multi-monitor coords; mouse is not the rejected-by-mGBA case). button: left/right/middle. Keyboard uses ydotool.",
      "inputSchema": {"type": "object", "properties": {
          "x": {"type": "integer"}, "y": {"type": "integer"},
          "button": {"type": "string", "default": "left"}, "count": {"type": "integer", "default": 1},
          "window_id": {"type": "integer"}, "name": {"type": "string"}}}},
-    {"name": "drag", "description": "Drag from (x1,y1) to (x2,y2).",
+    {"name": "drag", "description": "Drag from SCREEN (x1,y1) to (x2,y2) via xdotool (correct global multi-monitor coords).",
      "inputSchema": {"type": "object", "properties": {
          "x1": {"type": "integer"}, "y1": {"type": "integer"}, "x2": {"type": "integer"}, "y2": {"type": "integer"},
          "button": {"type": "string", "default": "left"}, "window_id": {"type": "integer"}, "name": {"type": "string"}}}},
-    {"name": "scroll", "description": "Scroll at (x,y). direction: up/down/left/right.",
+    {"name": "scroll", "description": "Scroll at SCREEN (x,y) via xdotool. direction: up/down/left/right.",
      "inputSchema": {"type": "object", "properties": {
          "x": {"type": "integer"}, "y": {"type": "integer"}, "direction": {"type": "string", "default": "up"},
          "amount": {"type": "integer", "default": 3}, "window_id": {"type": "integer"}, "name": {"type": "string"}}}},
-    {"name": "mouse_move", "description": "Move the real cursor to (x,y).",
+    {"name": "mouse_move", "description": "Move the real cursor to SCREEN (x,y) via xdotool (correct global multi-monitor coords).",
      "inputSchema": {"type": "object", "properties": {
          "x": {"type": "integer"}, "y": {"type": "integer"}, "window_id": {"type": "integer"}, "name": {"type": "string"}}}},
     {"name": "screenshot", "description": "Capture a window to an image (returns ONLY the image, no text — cheap). window_name: capture that window (e.g. 'mGBA'); if omitted, capture the focused window. Use this instead of computer_use capture to save tokens.",
