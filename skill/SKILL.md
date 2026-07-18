@@ -264,28 +264,36 @@ auto-advances cutscenes. Always confirm with a pixel diff, never by eye.
   for sharper dialogue text, down if context is tight. Falls back to full-res
   PNG if PIL import/resize fails (wrapped in try/except).
 
-## FAST VISION — set `image_input_mode: native` (kills the slow path)
-The OTHER big speed cost (separate from the 1.5k SOM text) is Hermes's
-**auxiliary-vision pre-processing**: in `image_input_mode: auto`, if the main
-model is NOT recognized as vision-capable, Hermes routes EVERY screenshot
-through a SEPARATE vision model (`auxiliary.vision`) to "describe" it as text
-before the main model sees anything — a full extra model call per screenshot.
-FIX (verified 2026-07-19): in the profile `config.yaml` set
-`agent.image_input_mode: native`. This forces Hermes to embed the image DIRECTLY
-into the main VLM (no aux vision call). Source authority:
-`agent/image_routing.py::decide_image_mode` returns `"native"` unconditionally
-when `agent.image_input_mode == "native"` (lines 438-439) — it does NOT consult
-`_lookup_supports_vision`, so it works even if Hermes mis-detects the local model.
-- This applies to BOTH user-attached images AND MCP tool-result images (the
-  screenshot tool's `image` block is passed through natively in native mode).
-- REQUIRES the main model to actually be a VLM. cuabot's `qwen3.5-9b-mtp` /
-  `qwen3-vl-2b` are VLMs, so native is correct + fast. If you point cuabot at a
-  TEXT-ONLY model, native mode will send images it can't parse → errors; flip to
-  `auto` (and rely on `_lookup_supports_vision` recognizing it) in that case.
-- Related config: `compression.enabled: true` (top-level `compression:` block)
-  lets the conversation auto-compress when long (gemma-4-12b-qat does the
-  summarization per `auxiliary.compression.model`). Verified gate at
-  `agent/agent_init.py:1647`: `compression.enabled: true` enables it.
+## FAST VISION — `image_input_mode: native` + `model.supports_vision: true` (BOTH required)
+There are TWO independent gates in Hermes before your model actually SEES pixels:
+1. `agent.image_input_mode: native` (skips the auxiliary-vision roundtrip).
+2. **`model.supports_vision: true`** — WITHOUT THIS the model gets a FILE PATH
+   string, not the image. Source: `run_agent.py::_tool_result_content_for_active_model`
+   (line ~5416) replaces any multimodal tool result with `_multimodal_text_summary`
+   (saves PNG to `cache/images/`, gives the model the path text) WHEN
+   `self._model_supports_vision()` is False. `_model_supports_vision()`
+   (`run_agent.py:5211`) returns True only if `_lookup_supports_vision()` resolves
+   True, which for a CUSTOM LM Studio model (not in models.dev) is False UNLESS you
+   declare it. The override (`agent/image_routing.py::_supports_vision_override`,
+   lines 202-207) reads the top-level `model.supports_vision` shortcut first.
+   SYMPTOM of the missing flag: the model says "the image is saved at
+   cache/images/...png, I can't see it" or "coordinate scale is 2.2482x" but
+   describes nothing. FIX: add `supports_vision: true` under `model:` in the
+   profile config. VERIFIED 2026-07-19: with the flag,
+   `_lookup_supports_vision('custom:lmstudio','qwen3.5-9b-mtp')` returns True.
+- `image_input_mode: native` detail: in `auto` mode, if the model is NOT
+  recognized as vision-capable, Hermes routes EVERY screenshot through a SEPARATE
+  vision model (`auxiliary.vision`) to "describe" it — a full extra model call per
+  shot. `native` forces embedding directly into the main VLM. Source authority:
+  `agent/image_routing.py::decide_image_mode` returns `"native"` unconditionally
+  when `agent.image_input_mode == "native"` (lines 438-439) — does NOT consult
+  `_lookup_supports_vision`, so it works even if Hermes mis-detects the model.
+- REQUIRES the main model to actually be a VLM (qwen3.5-9b-mtp / qwen3-vl-2b are).
+  If pointed at a TEXT-ONLY model, native sends images it can't parse -> errors;
+  flip to `auto` in that case.
+- `compression.enabled: true` (top-level `compression:` block) lets context
+  auto-compress when long (gemma-4-12b-qat summarizes per `auxiliary.compression.model`).
+  Verified gate at `agent/agent_init.py:1647`.
 
 ## PRIMARY-MONITOR SCREENSHOT + AUTO COORD MAPPING (single-monitor, accurate)
 For general desktop control, multi-monitor coords are a headache. The MCP
