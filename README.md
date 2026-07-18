@@ -1,74 +1,89 @@
 # cuabot-setup
 
 Backup of Henry's desktop-control game agent ("cuabot") built on Hermes Agent
-+ cua-driver + a hand-rolled xdotool MCP server.
++ a hand-rolled MCP server that drives mGBA's GBA input from INSIDE the emulator.
 
-## What this is
-A Hermes **profile** (`cuabot`) that drives the desktop via real X11 input
-(xdotool) through an MCP server, while using cua-driver ONLY for screenshots.
-Built to play Pokemon Emerald in mGBA, but general: any X11 window, sandboxed
-(flatpak/snap) or not.
+## The core idea (and why it's robust)
+To play a GAME in an emulator, you don't need OS-level input injection at all.
+mGBA 0.10.x ships **Lua scripting** (liblua + LuaSocket). A small Lua script
+(`mgba_agent.lua`) runs INSIDE mGBA, opens a TCP socket on `127.0.0.1:8930`, and
+drives the GBA buttons via mGBA's own `emu:setKeys(bitmask)` API.
 
-## Why xdotool instead of cua-driver input
-cua-driver routes input by **pid**. Flatpak's `bwrap` sandbox reports pid=2
-(the namespace wrapper), which owns no X window, so keystrokes are silently
-dropped on sandboxed apps (mGBA, Discord, ...). xdotool sends XSendEvent to a
-real `window_id` (or globally to the focused window) and always lands.
+The MCP server's `press_key(name="mGBA")` connects to that socket and sends the
+button. This is:
+- **Not** xdotool (synthetic X keys are REJECTED by mGBA's SDL/Qt input grab).
+- **Not** ydotool (needs a kernel uinput bridge to X that wasn't wired up).
+- **Not** dependent on window focus. Input goes straight into the emulator.
+=> It just works, every time.
 
-## Key fix (the #1 gotcha)
-mGBA (SDL/Qt) GRABS the keyboard and ignores synthetic keys sent to a specific
-window (`xdotool key --window WID` -> silently dropped). Fix:
-1. `focus_window` raises the window AND does a real `mousemove`+`click` at its
-   center -> gives the app TRUE X keyboard focus the grab honors.
-2. `press_key` / `type_text` send GLOBALLY (`xdotool key X`, no `--window`) ->
-   routes through the normal focus path to the frontmost window.
-Without step 1, keys do nothing. Mouse via `--window` works regardless.
+## Why the previous approaches failed (lessons learned)
+- cua-driver routes input by **pid**; flatpak's bwrap sandbox reports pid=2, so
+  keystrokes are silently dropped on mGBA. Dead end.
+- xdotool synthetic keys: PROVEN rejected by mGBA even with correct focus and
+  correct key bindings (Down/x/Return/raw keycode all did nothing). Dead end.
+- ydotool (kernel uinput): rc=0 but X11 never attached the virtual device
+  (no xinput/evdev seat bridge), so no app received events. Blocked without
+  sudo + X plumbing. Dead end.
+- Emulator-internal Lua socket: inputs the emulator's own button state. The
+  only approach that can't be rejected. THIS is the one.
 
 ## Files
-- `hermes_patch/cua_backend.py`     Patched cua-driver backend. Copy over
-                                    `~/.hermes/hermes-agent/tools/computer_use/cua_backend.py`
-                                    Adds: foreground mode (raise + agent-cursor
-                                    overlay), xdotool fallback in key(),
-                                    z-order DESC sort. (The xdotool MCP is the
-                                    primary input path; this patch is a secondary
-                                    safety net + enables foreground visibility.)
-- `profile/config.yaml`             cuabot profile config. Copy to
-                                    `~/.hermes/profiles/cuabot/config.yaml`
-                                    NOTE: toolsets = [hermes-cli, mcp:xdotool]
-                                    — computer_use is DELIBERATELY removed (the
-                                    screenshot tool below replaces its capture).
-- `profile/SOUL.md`                 cuabot system prompt (strict tool-use rules).
-                                    Copy to `~/.hermes/profiles/cuabot/SOUL.md`
-- `skill/xdotool_mcp.py`            The MCP server. Copy to
+- `skill/mgba_agent.lua`           The Lua control server. Load ONCE into mGBA
+                                    (Tools -> Scripting -> Load). It then
+                                    auto-loads on every future launch
+                                    (mGBA `autoload=1`).
+- `skill/xdotool_mcp.py`           The MCP server. `press_key(name="mGBA")`
+                                    routes to the socket; other windows fall
+                                    back to xdotool/ydotool. Also has a
+                                    `screenshot(window_name=)` tool (image-only,
+                                    ~0 tokens). Copy to
                                     `~/.hermes/skills/desktop-control-xdotool/xdotool_mcp.py`
-- `skill/SKILL.md`                  Skill doc.
+- `profile/config.yaml`            cuabot profile. toolsets = [hermes-cli,
+                                    mcp:xdotool]; computer_use removed.
+                                    Copy to `~/.hermes/profiles/cuabot/config.yaml`
+- `profile/SOUL.md`                cuabot system prompt.
+- `hermes_patch/cua_backend.py`    Patched cua-driver backend (secondary safety
+                                    net; foreground visibility). Optional.
+- `skill/SKILL.md`                 Skill doc.
 
-## Screenshot cost fix (why computer_use is removed)
-`computer_use capture` returns a multimodal block with a ~1.5k-token SOM/AX
-summary TEXT per capture — that was the slow/costly part. The MCP server has a
-`screenshot(window_name=)` tool that captures the window via `scrot -w WID` and
-returns ONLY an image block (no text) -> ~0 text tokens per screenshot. The
-model receives the image directly. Verified: model sees + describes the mGBA
-screen from the MCP screenshot tool.
+## Setup (one-time)
+1. Copy files: `skill/xdotool_mcp.py` -> `~/.hermes/skills/desktop-control-xdotool/`,
+   `profile/config.yaml` + `profile/SOUL.md` -> `~/.hermes/profiles/cuabot/`,
+   `skill/mgba_agent.lua` -> somewhere mGBA's file dialog can reach (e.g.
+   `/home/henry/Documents/agent/mgba_agent.lua`).
+2. Install xdotool (for screenshots + non-game input):
+   `sudo dnf install -y xdotool scrot`
+3. Load a local model in LM Studio (gemma-4-12b-qat proven; qwen3.5-2b-mtp also
+   works but is less reliable at multi-tool orchestration). Config -> `gemma-4-12b-qat`.
+4. Launch mGBA with software GL (so it's capturable) AND load the script:
+   ```
+   flatpak run --env=QT_OPENGL=software --env=LIBGL_ALWAYS_SOFTWARE=1 \
+     io.mgba.mGBA "<rom>"
+   ```
+   Then in mGBA: **Tools -> Scripting -> Load**, navigate to `mgba_agent.lua`,
+   open it. The scripting console should print:
+   `mgba_agent: listening on 127.0.0.1:8930`
+   => Done ONCE. `autoload=1` reloads it on every future mGBA launch.
+5. Run the agent: `cd <agent dir> && cuabot`
 
-Window-name resolution in `_find_window` returns an int window_id; `screenshot`
-handles both int and str. `scrot` refuses to overwrite existing files, so the
-temp path is removed before capture.
+## Verifying the socket (sanity check, no model needed)
+```
+python3 -c "import socket;s=socket.socket();s.connect(('127.0.0.1',8930));s.sendall(b'STATUS\n');import time;time.sleep(0.3);print(s.recv(256))"
+```
+Should print `OK held=... frame=...`. If connection refused, the script isn't
+loaded in mGBA (repeat step 4).
 
-## Setup
-1. Copy the four files above to their destinations.
-2. Ensure xdotool is installed: `which xdotool` (else `sudo dnf install xdotool`).
-3. Load a >=9B local model in LM Studio (gemma-4-12b-qat proven). Config points
-   at `custom:lmstudio`, `gemma-4-12b-qat`, context 90000.
-4. Launch mGBA with software GL so it's capturable:
-   `flatpak run --env=QT_OPENGL=software --env=LIBGL_ALWAYS_SOFTWARE=1 \
-    io.mgba.mGBA <rom>`
-5. Run: `cd <agent dir> && cuabot`
+## Game Boy button mapping (sent to the emulator, not the OS)
+A=A button, B=B button, START=Start, SELECT=Select, UP/DOWN/LEFT/RIGHT=d-pad.
+In mGBA's key config these are A=x, B=y, START=Return, SELECT=Backspace — but
+you send BUTTONS, so the OS keymap is irrelevant.
 
-## Game Boy keymap (mGBA)
-A=x, B=y, START=return, SELECT=backspace, dpad=up/down/left/right.
+## How the model drives the game
+1. `mcp_xdotool_screenshot(window_name="mGBA")` -> look at the screen.
+2. `mcp_xdotool_press_key(key="a", name="mGBA")` -> press A (no focus needed).
+3. Wait ~1s, screenshot again, confirm change.
+4. Repeat, one button at a time.
 
 ## Rollback
-If cua_backend.py breaks after a Hermes update, restore the original from the
-hermes-agent repo (`git checkout` in `~/.hermes/hermes-agent`) — the xdotool MCP
-is independent of the backend patch and keeps working.
+Everything is in this repo. If Hermes updates and breaks something, restore the
+specific file. The MCP server is independent of Hermes internals.
