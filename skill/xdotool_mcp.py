@@ -260,6 +260,24 @@ def screenshot(window_name=None):
         with open(tmppath, "rb") as f:
             raw = f.read()
         os.remove(tmppath)
+        # Downscale before encoding — a 1440p window PNG is enormous in base64
+        # and blows the model context. Cap the longest side (default 640 ~
+        # "480p is plenty" for a game) so the image is tiny in context.
+        try:
+            from io import BytesIO
+            from PIL import Image
+            img = Image.open(BytesIO(raw))
+            max_side = 640
+            if max(img.size) > max_side:
+                scale = max_side / float(max(img.size))
+                new_size = (max(1, int(img.size[0] * scale)),
+                            max(1, int(img.size[1] * scale)))
+                img = img.resize(new_size, Image.LANCZOS)
+            buf = BytesIO()
+            img.save(buf, format="PNG")
+            raw = buf.getvalue()
+        except Exception:
+            pass  # fall back to the full-res PNG if PIL/resizing fails
         b64 = base64.b64encode(raw).decode("ascii")
         # Return ONLY the image block — minimal token cost.
         return {"content": [{"type": "image", "data": b64, "mimeType": "image/png"}]}
@@ -341,6 +359,12 @@ def _dispatch(method, params, req_id):
                 res = {"error": f"unknown tool {name}"}
         except Exception as e:
             res = {"error": str(e)}
+        # screenshot() returns an already-formed MCP content block
+        # ({"content":[{"type":"image",...}]}); pass it through verbatim so the
+        # image reaches the model. All other tools return a plain dict that we
+        # serialize as a text block.
+        if isinstance(res, dict) and "content" in res:
+            return {"jsonrpc": "2.0", "id": req_id, "result": res}
         return {"jsonrpc": "2.0", "id": req_id, "result": {
             "content": [{"type": "text", "text": json.dumps(res)}]}}
     # notifications (initialized, etc.) -> no response
