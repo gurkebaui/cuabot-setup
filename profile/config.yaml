@@ -5,6 +5,13 @@ model:
   context_length: 90000
   max_tokens: 4096
   api_mode: chat_completions
+  # CRITICAL for native vision: Hermes only embeds screenshot pixels when the
+  # model is declared vision-capable. A custom LM Studio model is NOT in
+  # models.dev, so without this Hermes strips the image and hands the model
+  # only a file PATH (text), and it "can't see" anything. Declaring it makes
+  # run_agent._model_supports_vision() return True -> pixels stay in the tool
+  # result. (image_input_mode: native below then skips the aux-vision call.)
+  supports_vision: true
 custom_providers:
   - name: lmstudio
     base_url: http://localhost:1234/v1
