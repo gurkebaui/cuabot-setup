@@ -1,0 +1,48 @@
+model:
+  default: qwen3.5-9b-mtp
+  provider: custom:lmstudio
+  base_url: http://localhost:1234/v1
+  context_length: 90000
+  max_tokens: 4096
+custom_providers:
+  - name: lmstudio
+    base_url: http://localhost:1234/v1
+    api_key: lmstudio
+    api_mode: chat_completions
+    models:
+      - gemma-4-12b-qat
+    discover_models: true
+toolsets:
+  - hermes-cli
+  - computer_use
+  - mcp:xdotool
+computer_use:
+  foreground: true
+mcp_servers:
+  xdotool:
+    command: python3
+    args:
+      - /home/henry/.hermes/skills/desktop-control-xdotool/xdotool_mcp.py
+    env:
+      DISPLAY: :0
+agent:
+  max_turns: 90
+  gateway_timeout: 1800
+  image_input_mode: auto
+auxiliary:
+  vision:
+    provider: lmstudio
+    model: gemma-4-12b-qat
+    base_url: http://localhost:1234/v1
+    api_key: lmstudio
+    timeout: 300
+    context_length: 90000
+  compression:
+    model: gemma-4-12b-qat
+    context_length: 90000
+onboarding:
+  seen:
+    openclaw_residue_cleanup: true
+    tool_progress_prompt: true
+compression:
+  enabled: false
