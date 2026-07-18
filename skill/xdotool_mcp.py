@@ -206,96 +206,101 @@ def focus_window(name):
     return {"ok": True, "window_id": wid, "title": title}
 
 
-def press_key(key, window_id=None, name="mGBA"):
-    """Send ONE key GLOBALLY (to whatever window is focused). Works WITHOUT a
-    focused/target window. If `name` is given, focus that window first (helps
-    SDL-grabbing apps like mGBA), but the key is still sent globally."""
-    if name and window_id is None:
+def _resolve_wid(window_id=None, name="mGBA"):
+    """Resolve a window id: explicit id wins, else forgiving name match,
+    else None (caller decides: focus+act atomically, or act globally)."""
+    if window_id:
+        return int(window_id)
+    if name:
         wid, _ = _find_window(name)
-        if wid is not None:
-            _activate(wid)
-    elif window_id:
-        _activate(window_id)
-    ok, err = _run(["xdotool", "key", _keysym(key)])
+        return wid
+    return None
+
+
+def press_key(key, window_id=None, name="mGBA"):
+    """Send ONE key. Atomic: `xdotool windowactivate --sync WID key K` focuses the
+    window and sends the key in a SINGLE command, so focus cannot drift between
+    focus and keypress (which is what broke input before). SDL-grabbing apps
+    like mGBA only receive the key when focused — this guarantees it. If no
+    window resolves, sends globally to whatever is focused."""
+    wid = _resolve_wid(window_id, name)
+    if wid:
+        ok, err = _run(["xdotool", "windowactivate", "--sync", str(wid),
+                        "key", _keysym(key)])
+    else:
+        ok, err = _run(["xdotool", "key", _keysym(key)])
     return {"ok": ok, "key": key, "error": err}
 
 
-def type_text(text, window_id=None, name=None):
-    """Type text GLOBALLY (no window required). If `name` given, focus first."""
-    if name and window_id is None:
-        wid, _ = _find_window(name)
-        if wid is not None:
-            _activate(wid)
-    elif window_id:
-        _activate(window_id)
-    ok, err = _run(["xdotool", "type", "--delay", "0", text])
+def type_text(text, window_id=None, name="mGBA"):
+    """Type text. Atomic focus+type in one command (see press_key)."""
+    wid = _resolve_wid(window_id, name)
+    if wid:
+        ok, err = _run(["xdotool", "windowactivate", "--sync", str(wid),
+                        "type", "--delay", "0", text])
+    else:
+        ok, err = _run(["xdotool", "type", "--delay", "0", text])
     return {"ok": ok, "chars": len(text), "error": err}
 
 
-def click(x, y, button="left", count=1, window_id=None, name=None):
-    """Click at SCREEN coordinates (x, y) — GLOBAL, no window needed.
-    If `name` given, focus that window first (so the click lands in it)."""
-    if name and window_id is None:
-        wid, _ = _find_window(name)
-        if wid is not None:
-            _activate(wid)
-    elif window_id:
-        _activate(window_id)
+def click(x, y, button="left", count=1, window_id=None, name="mGBA"):
+    """Click at SCREEN coords. Atomic: focus + move + click in one command so the
+    click always lands in the intended window. `count` repeats the click."""
     btn = _btn(button)
-    _run(["xdotool", "mousemove", str(x), str(y)])
+    wid = _resolve_wid(window_id, name)
+    if wid:
+        cmd = ["xdotool", "windowactivate", "--sync", str(wid),
+               "mousemove", str(x), str(y)]
+    else:
+        cmd = ["xdotool", "mousemove", str(x), str(y)]
     for _ in range(max(1, count)):
-        ok, err = _run(["xdotool", "click", btn])
+        ok, err = _run(cmd + ["click", btn])
         if not ok:
             return {"ok": False, "error": err}
     return {"ok": True, "x": x, "y": y, "button": button}
 
 
-def drag(x1, y1, x2, y2, button="left", window_id=None, name=None):
-    """Drag between SCREEN coordinates — GLOBAL. If `name` given, focus first."""
-    if name and window_id is None:
-        wid, _ = _find_window(name)
-        if wid is not None:
-            _activate(wid)
-    elif window_id:
-        _activate(window_id)
+def drag(x1, y1, x2, y2, button="left", window_id=None, name="mGBA"):
+    """Drag between SCREEN coords. Atomic focus+move+down+move+up in one command."""
     btn = _btn(button)
-    _run(["xdotool", "mousemove", str(x1), str(y1)])
-    _run(["xdotool", "mousedown", btn])
+    wid = _resolve_wid(window_id, name)
     steps = max(2, min(20, abs(x2 - x1) + abs(y2 - y1) // 20))
+    cmd = ["xdotool"]
+    if wid:
+        cmd += ["windowactivate", "--sync", str(wid)]
+    cmd += ["mousemove", str(x1), str(y1), "mousedown", btn]
     for i in range(1, steps + 1):
         ix = x1 + (x2 - x1) * i // steps
         iy = y1 + (y2 - y1) * i // steps
-        _run(["xdotool", "mousemove", str(ix), str(iy)])
-    _run(["xdotool", "mouseup", btn])
-    return {"ok": True, "from": [x1, y1], "to": [x2, y2]}
+        cmd += ["mousemove", str(ix), str(iy)]
+    cmd += ["mouseup", btn]
+    ok, err = _run(cmd)
+    return {"ok": ok, "from": [x1, y1], "to": [x2, y2], "error": err}
 
 
-def scroll(x, y, direction="up", amount=3, window_id=None, name=None):
-    """Scroll at SCREEN coordinates (x, y) — GLOBAL. If `name` given, focus first."""
-    if name and window_id is None:
-        wid, _ = _find_window(name)
-        if wid is not None:
-            _activate(wid)
-    elif window_id:
-        _activate(window_id)
+def scroll(x, y, direction="up", amount=3, window_id=None, name="mGBA"):
+    """Scroll at SCREEN coords. Atomic focus+move+click(repeat) in one command."""
     btn = "4" if (direction or "").lower() in ("up", "left") else "5"
-    _run(["xdotool", "mousemove", str(x), str(y)])
+    wid = _resolve_wid(window_id, name)
     for _ in range(max(1, min(50, amount))):
-        ok, err = _run(["xdotool", "click", btn])
+        if wid:
+            ok, err = _run(["xdotool", "windowactivate", "--sync", str(wid),
+                            "mousemove", str(x), str(y), "click", btn])
+        else:
+            ok, err = _run(["xdotool", "mousemove", str(x), str(y), "click", btn])
         if not ok:
             return {"ok": False, "error": err}
     return {"ok": True, "x": x, "y": y, "direction": direction, "amount": amount}
 
 
-def mouse_move(x, y, window_id=None, name=None):
-    """Move the real cursor to SCREEN coordinates (x, y) — GLOBAL."""
-    if name and window_id is None:
-        wid, _ = _find_window(name)
-        if wid is not None:
-            _activate(wid)
-    elif window_id:
-        _activate(window_id)
-    ok, err = _run(["xdotool", "mousemove", str(x), str(y)])
+def mouse_move(x, y, window_id=None, name="mGBA"):
+    """Move the real cursor to SCREEN coords. Atomic focus+move in one command."""
+    wid = _resolve_wid(window_id, name)
+    if wid:
+        ok, err = _run(["xdotool", "windowactivate", "--sync", str(wid),
+                        "mousemove", str(x), str(y)])
+    else:
+        ok, err = _run(["xdotool", "mousemove", str(x), str(y)])
     return {"ok": ok, "x": x, "y": y, "error": err}
 
 
