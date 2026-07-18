@@ -40,6 +40,71 @@ def _has_xdotool() -> bool:
     return shutil.which("xdotool") is not None
 
 
+# ---------------------------------------------------------------------------
+# mGBA socket control (emulator-internal input, no OS injection)
+# ---------------------------------------------------------------------------
+# mGBA 0.10.x ships Lua scripting (liblua + LuaSocket). mgba_agent.lua runs
+# INSIDE mGBA, opens a TCP socket on 127.0.0.1:8930, and drives the GBA input
+# via emu:setKeys(). This is the ONLY input path that reliably works for mGBA:
+# xdotool/ydotool synthetic keys are rejected by mGBA's SDL/Qt input grab, and
+# OS focus hacks are fragile. The socket talks to the emulator directly.
+_MGBA_SOCKET_HOST = "127.0.0.1"
+_MGBA_SOCKET_PORT = 8930
+
+# GBA button -> bit (matches mGBA KEY_NAMES order)
+_MGBA_BITS = {
+    "A": 1 << 0, "B": 1 << 1, "SELECT": 1 << 2, "START": 1 << 3,
+    "LEFT": 1 << 4, "RIGHT": 1 << 5, "UP": 1 << 6, "DOWN": 1 << 7,
+    "R": 1 << 8, "L": 1 << 9,
+}
+
+def _mgba_socket_send(cmd, timeout=3.0):
+    """Send one command line to the running mgba_agent.lua socket.
+    Returns the server's text reply, or None if the socket isn't up."""
+    import socket as _sock
+    try:
+        s = _sock.create_connection((_MGBA_SOCKET_HOST, _MGBA_SOCKET_PORT), timeout=timeout)
+        s.sendall((cmd + "\n").encode("utf-8"))
+        s.settimeout(timeout)
+        buf = b""
+        # read until newline or short timeout
+        try:
+            while b"\n" not in buf:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+        except _sock.timeout:
+            pass
+        s.close()
+        return buf.decode("utf-8", "replace").strip()
+    except Exception as e:
+        return f"ERR socket: {e}"
+
+
+def mgba_press(button, action="PRESS"):
+    """Press a GBA button inside mGBA via the Lua socket.
+    action: PRESS (tap ~80ms) | HOLD | REL (release)."""
+    b = str(button).upper()
+    b = {"S": "START", "SSELECT": "SELECT"}.get(b, b)
+    if b not in _MGBA_BITS:
+        return {"ok": False, "error": f"unknown GBA button '{button}'"}
+    resp = _mgba_socket_send(f"{action} {b}")
+    return {"ok": True, "button": b, "action": action, "reply": resp}
+
+
+def mgba_type(text):
+    """Type a string into mGBA by tapping A/B/dpad? Not generally meaningful for
+    a game; provided for completeness (types via repeated HOLD/REL of keys)."""
+    return {"ok": False, "error": "mgba_type not supported (use mgba_press per button)"}
+
+
+def _mgba_socket_up():
+    """Quick liveness check of the mGBA control socket."""
+    r = _mgba_socket_send("STATUS", timeout=1.0)
+    return r is not None and not str(r).startswith("ERR")
+
+
 def _keysym(name: str) -> str:
     v = (name or "").lower()
     if v in ("up", "down", "left", "right"):
@@ -218,18 +283,43 @@ def _resolve_wid(window_id=None, name="mGBA"):
 
 
 def press_key(key, window_id=None, name="mGBA"):
-    """Send ONE key. Atomic: `xdotool windowactivate --sync WID key K` focuses the
-    window and sends the key in a SINGLE command, so focus cannot drift between
-    focus and keypress (which is what broke input before). SDL-grabbing apps
-    like mGBA only receive the key when focused — this guarantees it. If no
-    window resolves, sends globally to whatever is focused."""
+    """Send ONE key. For mGBA this goes through the emulator-internal Lua socket
+    (emu:setKeys) which is the only reliable path (xdotool/ydotool synthetic keys
+    are rejected by mGBA's input grab). For other windows it falls back to
+    ydotool/xdotool (global or focused)."""
+    if name and name.lower() in ("mgba", "mGBA", "pokemon"):
+        # emulator-internal input — no OS injection, no focus needed
+        btn = _map_to_gba_button(key)
+        if btn:
+            return mgba_press(btn, "PRESS")
+        # not a GBA button name; fall back to OS input for mGBA's own menus etc.
+    # non-mGBA or unknown button: OS input (ydotool if available, else xdotool)
     wid = _resolve_wid(window_id, name)
+    if shutil.which("ydotool") and _mgba_socket_up() is False:
+        if wid:
+            ok, err = _run(["ydotool", "key", _keysym(key)])
+        else:
+            ok, err = _run(["ydotool", "key", _keysym(key)])
+        if ok:
+            return {"ok": ok, "key": key, "method": "ydotool", "error": err}
     if wid:
         ok, err = _run(["xdotool", "windowactivate", "--sync", str(wid),
                         "key", _keysym(key)])
     else:
         ok, err = _run(["xdotool", "key", _keysym(key)])
-    return {"ok": ok, "key": key, "error": err}
+    return {"ok": ok, "key": key, "method": "xdotool", "error": err}
+
+
+def _map_to_gba_button(key):
+    """Map a key name to a GBA button for the mGBA socket path."""
+    k = str(key).lower()
+    return {
+        "a": "A", "b": "B", "x": "A", "y": "B",
+        "start": "START", "return": "START", "enter": "START",
+        "select": "SELECT", "backspace": "SELECT",
+        "up": "UP", "down": "DOWN", "left": "LEFT", "right": "RIGHT",
+        "^": "UP", "v": "DOWN", "<": "LEFT", ">": "RIGHT",
+    }.get(k)
 
 
 def type_text(text, window_id=None, name="mGBA"):
@@ -380,9 +470,12 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "focus_window", "description": "Raise + focus a window by title substring; returns window_id.",
      "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}}}},
-    {"name": "press_key", "description": "Send ONE key via xdotool. Keys: return, x, y, up, down, left, right, backspace, escape, tab, or 'ctrl+c'.",
+    {"name": "press_key", "description": "Send ONE key. For mGBA this drives the emulator's GBA buttons via its internal Lua socket (reliable). Keys: a/x (A button), b/y (B), return/start (START), backspace (SELECT), up/down/left/right (dpad). Also works as global xdotool/ydotool for other apps.",
      "inputSchema": {"type": "object", "properties": {
-         "key": {"type": "string"}, "window_id": {"type": "integer"}, "name": {"type": "string"}}}},
+         "key": {"type": "string"}, "window_id": {"type": "integer"}, "name": {"type": "string", "default": "mGBA"}}}},
+    {"name": "mgba_press", "description": "Press a GBA button INSIDE mGBA via the emulator's Lua socket (emu:setKeys). Most reliable input for mGBA. button: A/B/START/SELECT/UP/DOWN/LEFT/RIGHT. action: PRESS (tap) | HOLD | REL.",
+     "inputSchema": {"type": "object", "properties": {
+         "button": {"type": "string"}, "action": {"type": "string", "default": "PRESS"}}}},
     {"name": "type_text", "description": "Type text into a window via xdotool.",
      "inputSchema": {"type": "object", "properties": {
          "text": {"type": "string"}, "window_id": {"type": "integer"}, "name": {"type": "string"}}}},
@@ -426,6 +519,8 @@ def _dispatch(method, params, req_id):
                 res = focus_window(args.get("name", ""))
             elif name == "press_key":
                 res = press_key(args.get("key", ""), args.get("window_id"), args.get("name", "mGBA"))
+            elif name == "mgba_press":
+                res = mgba_press(args.get("button", ""), args.get("action", "PRESS"))
             elif name == "type_text":
                 res = type_text(args.get("text", ""), args.get("window_id"), args.get("name", "mGBA"))
             elif name == "click":
