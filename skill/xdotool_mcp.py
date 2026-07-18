@@ -24,6 +24,7 @@ Tools:
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -424,6 +425,48 @@ def _to_global(x, y, name, window_id):
         return x, y
 
 
+# Longest-side cap for screenshots (keeps the image tiny in context = fast).
+SHOT_MAX_SIDE = 854
+
+_PRIMARY = None  # cached (x, y, w, h) of the primary monitor in global space
+
+
+def _primary_monitor():
+    """Return the primary monitor's global rect (x, y, w, h), cached.
+    Parsed from `xrandr` (the monitor tagged 'primary')."""
+    global _PRIMARY
+    if _PRIMARY:
+        return _PRIMARY
+    try:
+        out = subprocess.run(["xrandr", "--query"],
+                             capture_output=True, text=True, timeout=10).stdout
+        for ln in out.splitlines():
+            if "primary" in ln:
+                # e.g. "HDMI-1 connected primary 2560x1440+1920+0 (...)"
+                m = re.search(r"(\d+)x(\d+)\+(\d+)\+(\d+)", ln)
+                if m:
+                    w, h, x, y = (int(g) for g in m.groups())
+                    _PRIMARY = (x, y, w, h)
+                    return _PRIMARY
+    except Exception:
+        pass
+    # fallback: whole screen
+    _PRIMARY = (0, 0, 1920, 1080)
+    return _PRIMARY
+
+
+def _from_primary(x, y):
+    """Translate coords the model READ from the downscaled primary-monitor
+    screenshot (what it sees) into GLOBAL X screen coords.
+
+    Flow: model sees a screenshot downscaled so its longest side = SHOT_MAX_SIDE.
+    Upscale by the same ratio to recover original primary-monitor pixels, then
+    add the primary monitor's global offset."""
+    px, py, pw, ph = _primary_monitor()
+    s = max(pw, ph) / float(SHOT_MAX_SIDE)
+    return int(px + x * s), int(py + y * s)
+
+
 def press_key(key, window_id=None, name="mGBA"):
     """Send ONE key. For mGBA this goes through the emulator-internal Lua socket
     (emu:setKeys) which is the only reliable path (xdotool/ydotool synthetic keys
@@ -480,9 +523,16 @@ def type_text(text, window_id=None, name="mGBA"):
 
 
 def click(x, y, button="left", count=1, window_id=None, name="mGBA"):
-    """Click at WINDOW-LOCAL (x,y) from a screenshot; translated to global
-    coords. Mouse uses xdotool (correct global multi-monitor coords)."""
-    gx, gy = _to_global(x, y, name, window_id)
+    """Click at coords from a screenshot; translated to global coords.
+    - name="primary": coords are from the downscaled primary-monitor screenshot
+      (screenshot(window_name="primary")); auto upscaled + offset to global.
+    - other name: window-local coords (window geometry offset added).
+    - no name: coords are already global.
+    Mouse uses xdotool (correct global multi-monitor coords)."""
+    if name and name.lower() == "primary":
+        gx, gy = _from_primary(x, y)
+    else:
+        gx, gy = _to_global(x, y, name, window_id)
     btn = _btn(button)
     wid = _resolve_wid(window_id, name)
     if wid:
@@ -498,9 +548,14 @@ def click(x, y, button="left", count=1, window_id=None, name="mGBA"):
 
 
 def drag(x1, y1, x2, y2, button="left", window_id=None, name="mGBA"):
-    """Drag between WINDOW-LOCAL coords (screenshot space); translated to global."""
-    gx1, gy1 = _to_global(x1, y1, name, window_id)
-    gx2, gy2 = _to_global(x2, y2, name, window_id)
+    """Drag between coords from a screenshot; translated to global.
+    name="primary" uses the downscaled primary-monitor screenshot coords."""
+    if name and name.lower() == "primary":
+        gx1, gy1 = _from_primary(x1, y1)
+        gx2, gy2 = _from_primary(x2, y2)
+    else:
+        gx1, gy1 = _to_global(x1, y1, name, window_id)
+        gx2, gy2 = _to_global(x2, y2, name, window_id)
     btn = _btn(button)
     wid = _resolve_wid(window_id, name)
     steps = max(2, min(20, abs(gx2 - gx1) + abs(gy2 - gy1) // 20))
@@ -519,8 +574,12 @@ def drag(x1, y1, x2, y2, button="left", window_id=None, name="mGBA"):
 
 
 def scroll(x, y, direction="up", amount=3, window_id=None, name="mGBA"):
-    """Scroll at WINDOW-LOCAL (x,y) from a screenshot; translated to global."""
-    gx, gy = _to_global(x, y, name, window_id)
+    """Scroll at coords from a screenshot; translated to global.
+    name="primary" uses the downscaled primary-monitor screenshot coords."""
+    if name and name.lower() == "primary":
+        gx, gy = _from_primary(x, y)
+    else:
+        gx, gy = _to_global(x, y, name, window_id)
     btn = "4" if (direction or "").lower() in ("up", "left") else "5"
     wid = _resolve_wid(window_id, name)
     for _ in range(max(1, min(50, amount))):
@@ -535,9 +594,12 @@ def scroll(x, y, direction="up", amount=3, window_id=None, name="mGBA"):
 
 
 def mouse_move(x, y, window_id=None, name="mGBA"):
-    """Move the real cursor to WINDOW-LOCAL (x,y) from a screenshot; translated
-    to global coords via xdotool (correct global multi-monitor coords)."""
-    gx, gy = _to_global(x, y, name, window_id)
+    """Move the real cursor to coords from a screenshot; translated to global.
+    name="primary" uses the downscaled primary-monitor screenshot coords."""
+    if name and name.lower() == "primary":
+        gx, gy = _from_primary(x, y)
+    else:
+        gx, gy = _to_global(x, y, name, window_id)
     wid = _resolve_wid(window_id, name)
     if wid:
         ok, err = _run(["xdotool", "windowactivate", "--sync", str(wid),
@@ -548,37 +610,76 @@ def mouse_move(x, y, window_id=None, name="mGBA"):
 
 
 def screenshot(window_name=None):
-    """Capture a window to PNG and return it as an MCP image block.
+    """Capture to a PNG and return it as an MCP image block.
 
     Returns ONLY the image (no SOM/AX summary text) so the model pays ~0 text
     tokens per screenshot — the whole point of moving capture off cua-driver,
     whose capture attaches a ~1.5k-token 'SOM index + summary' text block.
 
-    If window_name is given, capture that window; otherwise capture the
-    currently-focused window.
+    Modes:
+      - window_name="primary": capture the PRIMARY monitor only (cropped from a
+        full-screen shot), downscaled to SHOT_MAX_SIDE. Returns image + a `meta`
+        block with the coordinate `scale` and `monitor` rect so the model can
+        map the pixels it sees back to real screen coordinates for clicking.
+        This is the FAST, single-monitor path (no multi-monitor confusion).
+      - window_name=<other>: capture that window (window-local coords).
+      - no window_name: capture the focused window.
     """
     import base64
-    wid = None
-    if window_name:
-        wid, _ = _find_window(window_name)
-    if wid is None:
-        # frontmost focused window
-        try:
-            wid = subprocess.run(["xdotool", "getwindowfocus"],
-                                 capture_output=True, text=True, timeout=10).stdout.strip()
-        except Exception:
-            wid = None
-    if not wid or (isinstance(wid, str) and not wid.isdigit()):
-        return {"isError": True, "content": [{"type": "text",
-                "text": json.dumps({"error": "no window to capture"})}]}
-    wid = int(wid)
+    px, py, pw, ph = _primary_monitor()
     try:
         import tempfile, os
         fd, tmppath = tempfile.mkstemp(suffix=".png")
         os.close(fd)
-        # scrot refuses to overwrite an existing file, so remove the empty
-        # placeholder mkstemp created and let scrot create it fresh.
-        os.remove(tmppath)
+        os.remove(tmppath)  # scrot won't overwrite; let it create fresh
+
+        if window_name and window_name.lower() == "primary":
+            # full-screen, then crop to the primary monitor rect
+            full = tmppath + ".full.png"
+            png = subprocess.run(["scrot", full],
+                                 capture_output=True, text=True, timeout=15)
+            if png.returncode != 0 or not os.path.getsize(full):
+                try: os.remove(full)
+                except Exception: pass
+                return {"isError": True, "content": [{"type": "text",
+                        "text": json.dumps({"error": "scrot failed",
+                                             "stderr": png.stderr[:200]})}]}
+            from io import BytesIO
+            from PIL import Image
+            img = Image.open(full)
+            os.remove(full)
+            img = img.crop((px, py, px + pw, py + ph))
+            scale = max(pw, ph) / float(SHOT_MAX_SIDE)
+            if max(img.size) > SHOT_MAX_SIDE:
+                sc = SHOT_MAX_SIDE / float(max(img.size))
+                img = img.resize((max(1, int(img.size[0] * sc)),
+                                  max(1, int(img.size[1] * sc))), Image.LANCZOS)
+            buf = BytesIO()
+            img.save(buf, format="PNG")
+            raw = buf.getvalue()
+            b64 = base64.b64encode(raw).decode("ascii")
+            meta = {"scale": round(scale, 4),
+                    "monitor": {"x": px, "y": py, "w": pw, "h": ph},
+                    "note": "coords you read from this image are in the "
+                            "downscaled space; click(name='primary', x, y) "
+                            "maps them back automatically"}
+            return {"content": [{"type": "image", "data": b64, "mimeType": "image/png"},
+                                {"type": "text", "text": json.dumps(meta)}]}
+
+        # window (or focused-window) capture
+        wid = None
+        if window_name:
+            wid, _ = _find_window(window_name)
+        if wid is None:
+            try:
+                wid = subprocess.run(["xdotool", "getwindowfocus"],
+                                     capture_output=True, text=True, timeout=10).stdout.strip()
+            except Exception:
+                wid = None
+        if not wid or (isinstance(wid, str) and not wid.isdigit()):
+            return {"isError": True, "content": [{"type": "text",
+                    "text": json.dumps({"error": "no window to capture"})}]}
+        wid = int(wid)
         png = subprocess.run(["scrot", "-w", str(wid), tmppath],
                              capture_output=True, text=True, timeout=15)
         if png.returncode != 0 or not os.path.getsize(tmppath):
@@ -590,21 +691,20 @@ def screenshot(window_name=None):
             raw = f.read()
         os.remove(tmppath)
         # Downscale before encoding — a 1440p window PNG is enormous in base64
-        # and blows the model context. Cap the longest side (default 640 ~
+        # and blows the model context. Cap the longest side (default 854 ~
         # "480p is plenty" for a game) so the image is tiny in context.
         try:
             from io import BytesIO
             from PIL import Image
             img = Image.open(BytesIO(raw))
-            max_side = 854
-            if max(img.size) > max_side:
-                scale = max_side / float(max(img.size))
-                new_size = (max(1, int(img.size[0] * scale)),
-                            max(1, int(img.size[1] * scale)))
+            if max(img.size) > SHOT_MAX_SIDE:
+                sc = SHOT_MAX_SIDE / float(max(img.size))
+                new_size = (max(1, int(img.size[0] * sc)),
+                            max(1, int(img.size[1] * sc)))
                 img = img.resize(new_size, Image.LANCZOS)
-            buf = BytesIO()
-            img.save(buf, format="PNG")
-            raw = buf.getvalue()
+                buf = BytesIO()
+                img.save(buf, format="PNG")
+                raw = buf.getvalue()
         except Exception:
             pass  # fall back to the full-res PNG if PIL/resizing fails
         b64 = base64.b64encode(raw).decode("ascii")
@@ -623,6 +723,8 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "focus_window", "description": "Raise + focus a window by title substring; returns window_id.",
      "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}}}},
+    {"name": "screenshot", "description": "Capture an image. window_name='primary' captures the PRIMARY monitor only (downscaled, fast, single-monitor — returns image + a meta block with coordinate scale). Other window_name captures that window (window-local coords). No arg = focused window. Returns image only (cheap, no text). Use 'primary' for general desktop control.",
+     "inputSchema": {"type": "object", "properties": {"window_name": {"type": "string"}}}},
     {"name": "press_key", "description": "Send ONE key (or chord like 'ctrl+c'). For mGBA this drives the emulator's GBA buttons via its internal Lua socket (reliable). For ALL other windows it uses ydotool REAL kernel input (works on any app, incl. flatpak/sandboxed). Keys: letters a-z, digits, return/enter, backspace, tab, space, up/down/left/right, escape, ctrl+..., shift+..., alt+....",
      "inputSchema": {"type": "object", "properties": {
          "key": {"type": "string"}, "window_id": {"type": "integer"}, "name": {"type": "string", "default": "mGBA"}}}},
