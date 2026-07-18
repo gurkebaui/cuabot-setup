@@ -57,31 +57,67 @@ def _btn(button: str) -> str:
 
 
 def _activate(wid: int) -> None:
-    if wid:
-        # Raise the window AND give it true X keyboard focus by clicking its
-        # center. `windowactivate` alone is ignored by SDL/Qt apps that grab the
-        # keyboard; a real (synthetic) click establishes focus the grab honors.
-        # xdotool's `key`/`type` are then sent globally (no --window) so they
-        # route through the normal focus path to the frontmost window.
-        subprocess.run(["xdotool", "windowactivate", "--sync", str(wid)],
+    if not wid:
+        return
+    # Raise the window AND give it true X keyboard focus by clicking its
+    # center. `windowactivate` alone is ignored by SDL/Qt apps that grab the
+    # keyboard; a real (synthetic) click establishes focus the grab honors.
+    # xdotool's `key`/`type` are then sent globally (no --window) so they
+    # route through the normal focus path to the frontmost window.
+    subprocess.run(["xdotool", "windowactivate", "--sync", str(wid)],
+                   capture_output=True, text=True, timeout=10)
+    # Fallback if windowactivate didn't take.
+    subprocess.run(["xdotool", "windowfocus", str(wid)],
+                   capture_output=True, text=True, timeout=10)
+    # Find the on-screen center to click. Some windows (e.g. mGBA's flatpak
+    # container) report a 1x1 geometry at (-100,-100); in that case use the
+    # largest child window's geometry instead.
+    geom = subprocess.run(["xdotool", "getwindowgeometry", "--shell", str(wid)],
+                          capture_output=True, text=True, timeout=10).stdout
+    cx = cy = w = h = 0
+    for line in geom.splitlines():
+        if line.startswith("X="):
+            cx = int(line.split("=")[1])
+        elif line.startswith("Y="):
+            cy = int(line.split("=")[1])
+        elif line.startswith("WIDTH="):
+            w = int(line.split("=")[1])
+        elif line.startswith("HEIGHT="):
+            h = int(line.split("=")[1])
+    if w <= 2 or h <= 2 or cx < 0 or cy < 0:
+        # 1x1 / off-screen container -> use the largest visible child.
+        kids = subprocess.run(["xdotool", "search", "--onlyvisible", "--pid",
+                               str(_pid_of(wid))], capture_output=True, text=True, timeout=10).stdout.split()
+        best = (0, 0, 0, 0, 0)
+        for k in kids:
+            if not k.strip().isdigit() or int(k) == wid:
+                continue
+            g2 = subprocess.run(["xdotool", "getwindowgeometry", "--shell", k],
+                                capture_output=True, text=True, timeout=5).stdout
+            x2 = y2 = w2 = h2 = 0
+            for gl in g2.splitlines():
+                if gl.startswith("X="): x2 = int(gl.split("=")[1])
+                elif gl.startswith("Y="): y2 = int(gl.split("=")[1])
+                elif gl.startswith("WIDTH="): w2 = int(gl.split("=")[1])
+                elif gl.startswith("HEIGHT="): h2 = int(gl.split("=")[1])
+            if w2 * h2 > best[3] * best[4]:
+                best = (int(k), x2, y2, w2, h2)
+        if best[3] > 2:
+            wid, cx, cy, w, h = best[0], best[1], best[2], best[3], best[4]
+    ccx, ccy = cx + w // 2, cy + h // 2
+    if ccx > 0 and ccy > 0:
+        subprocess.run(["xdotool", "mousemove", str(ccx), str(ccy)],
                        capture_output=True, text=True, timeout=10)
-        geom = subprocess.run(["xdotool", "getwindowgeometry", "--shell", str(wid)],
-                              capture_output=True, text=True, timeout=10).stdout
-        cx = cy = 0
-        for line in geom.splitlines():
-            if line.startswith("X="):
-                cx = int(line.split("=")[1])
-            elif line.startswith("Y="):
-                cy = int(line.split("=")[1])
-            elif line.startswith("WIDTH="):
-                cx += int(line.split("=")[1]) // 2
-            elif line.startswith("HEIGHT="):
-                cy += int(line.split("=")[1]) // 2
-        if cx > 0 and cy > 0:
-            subprocess.run(["xdotool", "mousemove", str(cx), str(cy)],
-                           capture_output=True, text=True, timeout=10)
-            subprocess.run(["xdotool", "click", "1"],
-                           capture_output=True, text=True, timeout=10)
+        subprocess.run(["xdotool", "click", "1"],
+                       capture_output=True, text=True, timeout=10)
+
+
+def _pid_of(wid: int):
+    try:
+        return subprocess.run(["xdotool", "getwindowpid", str(wid)],
+                              capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:
+        return ""
 
 
 def _find_window(name: str):
@@ -170,7 +206,7 @@ def focus_window(name):
     return {"ok": True, "window_id": wid, "title": title}
 
 
-def press_key(key, window_id=None, name=None):
+def press_key(key, window_id=None, name="mGBA"):
     """Send ONE key GLOBALLY (to whatever window is focused). Works WITHOUT a
     focused/target window. If `name` is given, focus that window first (helps
     SDL-grabbing apps like mGBA), but the key is still sent globally."""
@@ -384,20 +420,20 @@ def _dispatch(method, params, req_id):
             elif name == "focus_window":
                 res = focus_window(args.get("name", ""))
             elif name == "press_key":
-                res = press_key(args.get("key", ""), args.get("window_id"), args.get("name"))
+                res = press_key(args.get("key", ""), args.get("window_id"), args.get("name", "mGBA"))
             elif name == "type_text":
-                res = type_text(args.get("text", ""), args.get("window_id"), args.get("name"))
+                res = type_text(args.get("text", ""), args.get("window_id"), args.get("name", "mGBA"))
             elif name == "click":
                 res = click(args.get("x", 0), args.get("y", 0), args.get("button", "left"),
-                            args.get("count", 1), args.get("window_id"), args.get("name"))
+                            args.get("count", 1), args.get("window_id"), args.get("name", "mGBA"))
             elif name == "drag":
                 res = drag(args.get("x1", 0), args.get("y1", 0), args.get("x2", 0), args.get("y2", 0),
-                           args.get("button", "left"), args.get("window_id"), args.get("name"))
+                           args.get("button", "left"), args.get("window_id"), args.get("name", "mGBA"))
             elif name == "scroll":
                 res = scroll(args.get("x", 0), args.get("y", 0), args.get("direction", "up"),
-                             args.get("amount", 3), args.get("window_id"), args.get("name"))
+                             args.get("amount", 3), args.get("window_id"), args.get("name", "mGBA"))
             elif name == "mouse_move":
-                res = mouse_move(args.get("x", 0), args.get("y", 0), args.get("window_id"), args.get("name"))
+                res = mouse_move(args.get("x", 0), args.get("y", 0), args.get("window_id"), args.get("name", "mGBA"))
             elif name == "screenshot":
                 res = screenshot(args.get("window_name"))
             else:

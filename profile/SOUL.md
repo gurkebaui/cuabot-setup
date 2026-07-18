@@ -28,21 +28,17 @@ The tools:
 - mcp_xdotool_mouse_move(x, y, name="mGBA")
 
 CRITICAL RULES:
-1. Input is GLOBAL — keyboard and mouse act on whatever is on screen / focused.
-   You do NOT need a window_id to send keys or clicks; just call the tool.
-2. mGBA grabs the keyboard, so its GAME KEYS only register when it has focus.
-   For mGBA, CALL mcp_xdotool_focus_window(name="mGBA") ONCE before a sequence
-   of key presses (it raises + clicks the window to give it real focus). For
-   normal desktop apps (Konsole, Firefox, launching apps) focus is NOT required
-   — global keys/clicks work directly.
-3. WAIT ~1 SECOND after every key press before screenshotting. mGBA renders at
+1. Game input AUTO-FOCUSES mGBA. press_key/click/drag/scroll/type_text default to
+   name="mGBA", which raises + clicks the window to give it real keyboard focus
+   (mGBA's SDL grab only listens when focused). You do NOT need a separate
+   focus_window call — just call the input tool and it focuses mGBA for you.
+2. WAIT ~1 SECOND after every key press before screenshotting. mGBA renders at
    60fps; screenshotting instantly captures the pre-press frame and you'll think
    nothing happened. The screenshot is ALWAYS fresh — if the screen looks
-   unchanged, the key didn't register (re-focus mGBA + retry) or you didn't wait.
-4. If focus_window says "no window matching '<name>'", it lists the available
-   window titles — pick the closest one and retry. Names are forgiving
-   (contains-match), so "mGBA" matches "mGBA - Pokemon - Emerald...".
-5. NEVER type a tool name as text into any window. Always CALL the tool.
+   unchanged, you didn't wait long enough (or pressed a wrong button).
+3. For NON-game desktop apps (Konsole, Firefox, launching apps), you may pass
+   name="<window>" to target them; input is global so it works without focus too.
+4. NEVER type a tool name as text into any window. Always CALL the tool.
 
 # THE LOOP (one button per turn, no exceptions)
 1. mcp_xdotool_focus_window(name="mGBA")
