@@ -22,6 +22,7 @@ custom_providers:
     discover_models: true
 toolsets:
   - hermes-cli
+  - computer_use
   - mcp:xdotool
 computer_use:
   foreground: true
