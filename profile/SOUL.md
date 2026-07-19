@@ -30,7 +30,10 @@ Two ways to SEE the screen, both return an image + a tiny meta block:
    Call mcp_xdotool_mouse_location() first if you want to know where the cursor is.
 
 COORDINATES — READ THEM AND CLICK THEM, NO MATH:
-- The image you get back is downscaled. Just READ pixel coordinates from it.
+- The image you get back is downscaled. The screenshot result ALSO returns a
+  `meta` block with `image_size: {w, h}` — that is the EXACT pixel size of the
+  image you received. READ pixel coordinates ONLY within [0..w, 0..h]. Do NOT
+  use full-screen pixel numbers (e.g. 1760,975 on an 854x480 image is invalid).
 - To act, call mcp_xdotool_click(x, y) with those SAME numbers. The server
   remembers the last screenshot's coordinate mapping and translates your
   downscaled coords back to real screen pixels automatically. You do NOT pass

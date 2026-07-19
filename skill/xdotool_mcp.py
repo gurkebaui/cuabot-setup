@@ -525,9 +525,45 @@ def _map_click(x, y, name, window_id):
         return _to_global(x, y, name, window_id)
     m = STATE.get("map")
     if m is not None:
-        return int(m["ox"] + x * m["sx"]), int(m["oy"] + y * m["sy"])
+        gx = m["ox"] + x * m["sx"]
+        gy = m["oy"] + y * m["sy"]
+        # Defensive: if the model read coords outside the image it saw (a common
+        # failure), the mapped global coord can land off-desktop (e.g. 8436,2552
+        # on a 6400x1440 rig). Clamp to the virtual desktop so the click at least
+        # lands on a real monitor, and flag it for the model to re-read.
+        vw, vh = _virtual_bounds()
+        if gx < 0 or gy < 0 or gx > vw or gy > vh:
+            cgx = max(0, min(vw, int(gx)))
+            cgy = max(0, min(vh, int(gy)))
+            STATE["warn"] = ("CLAMPED: requested global (%.0f,%.0f) is off-desktop "
+                             "(image coords read were outside the screenshot). "
+                             "Re-read coords from the image (range in its meta)."
+                             % (gx, gy))
+            return cgx, cgy
+        STATE["warn"] = None
+        return int(gx), int(gy)
     # nothing to map against: assume already global
+    STATE["warn"] = None
     return x, y
+
+
+def _virtual_bounds():
+    """Total virtual desktop size in global coords (from xrandr)."""
+    try:
+        out = subprocess.run(["xrandr", "--query"],
+                             capture_output=True, text=True, timeout=10).stdout
+        vw = vh = 0
+        for ln in out.splitlines():
+            m = re.search(r"(\d+)x(\d+)\+(\d+)\+(\d+)", ln)
+            if m:
+                w, h, x, y = (int(g) for g in m.groups())
+                vw = max(vw, x + w)
+                vh = max(vh, y + h)
+        if vw and vh:
+            return vw, vh
+    except Exception:
+        pass
+    return 6400, 1440
 
 
 def press_key(key, window_id=None, name="mGBA"):
@@ -604,7 +640,10 @@ def click(x, y, button="left", count=1, window_id=None, name=None):
         ok, err = _run(cmd + ["click", btn])
         if not ok:
             return {"ok": False, "error": err}
-    return {"ok": True, "x": x, "y": y, "global": [gx, gy], "button": button}
+    res = {"ok": True, "x": x, "y": y, "global": [gx, gy], "button": button}
+    if STATE.get("warn"):
+        res["warning"] = STATE["warn"]
+    return res
 
 
 def drag(x1, y1, x2, y2, button="left", window_id=None, name=None):
@@ -710,9 +749,16 @@ def screenshot(window_name=None):
             STATE["map"] = {"ox": px, "oy": py, "sx": scale, "sy": scale}
             meta = {"scale": round(scale, 4),
                     "monitor": {"x": px, "y": py, "w": pw, "h": ph},
-                    "note": "coords you read from this image are in the "
-                            "downscaled space; click(x, y) maps them back "
-                            "automatically (or pass name='primary')"}
+                    # CRITICAL: tell the model the ACTUAL pixel size of the image
+                    # it just received, so it reads coords INSIDE that range.
+                    # Without this it assumes full-res (e.g. reads 1760,975 on an
+                    # 854x480 image) and the click maps to bogus global coords.
+                    "image_size": {"w": img.size[0], "h": img.size[1]},
+                    "note": "IMAGE is %dx%d px (downscaled). READ coords in that "
+                            "range [0..%d, 0..%d]. click(x,y) auto-maps them to the "
+                            "monitor; you do NO math. Do not use full-screen pixel "
+                            "numbers." % (img.size[0], img.size[1],
+                                          img.size[0], img.size[1])}
             return {"content": [{"type": "image", "data": b64, "mimeType": "image/png"},
                                 {"type": "text", "text": json.dumps(meta)}]}
 
@@ -774,8 +820,21 @@ def screenshot(window_name=None):
         b64 = base64.b64encode(raw).decode("ascii")
         # cache coordinate mapping so click(x,y) auto-maps from THIS image
         STATE["map"] = {"ox": win_x, "oy": win_y, "sx": win_scale, "sy": win_scale}
-        # Return ONLY the image block — minimal token cost.
-        return {"content": [{"type": "image", "data": b64, "mimeType": "image/png"}]}
+        # Return the image block + a tiny meta with the actual image size so the
+        # model reads coords INSIDE the image (not full-res guesses).
+        try:
+            from io import BytesIO
+            from PIL import Image
+            _iw, _ih = Image.open(BytesIO(raw)).size
+        except Exception:
+            _iw, _ih = 0, 0
+        meta = {"image_size": {"w": _iw, "h": _ih},
+                "window_geometry": {"x": win_x, "y": win_y},
+                "note": "IMAGE is %dx%d px. READ coords in that range "
+                        "[0..%d, 0..%d]; click(x,y) auto-maps to this window. "
+                        "Do not use full-screen pixel numbers." % (_iw, _ih, _iw, _ih)}
+        return {"content": [{"type": "image", "data": b64, "mimeType": "image/png"},
+                            {"type": "text", "text": json.dumps(meta)}]}
     except Exception as e:
         return {"isError": True, "content": [{"type": "text",
                 "text": json.dumps({"error": str(e)})}]}
