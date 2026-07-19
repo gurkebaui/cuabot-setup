@@ -99,6 +99,10 @@ coordinate map (`STATE["map"]`). `click(x, y)` with the coords you READ from the
 last image auto-maps to real screen pixels. Do NOT pass a window name for clicks
 (passing `name="mGBA"` is the classic wrong-target bug). `name="primary"` only
 forces the primary mapping if you switched monitors between shot and click.
+**The screenshot meta returns `image_size: {w, h}` — the EXACT pixel size of the
+image you received. READ coords ONLY within [0..w, 0..h]; do NOT use full-screen
+pixel numbers (e.g. 1760,975 on an 854x480 image is invalid and will clamp to a
+wrong spot). See the "8436 bug" pitfall below.**
 
 ## Loop (e.g. playing a game)
 1. CALL `mcp_xdotool_focus_window(name="mGBA")` to raise the game FIRST.
@@ -295,6 +299,12 @@ There are TWO independent gates in Hermes before your model actually SEES pixels
   auto-compress when long (gemma-4-12b-qat summarizes per `auxiliary.compression.model`).
   Verified gate at `agent/agent_init.py:1647`.
 
+OPERATIONAL — config changes need a FRESH launch: a running agent loads
+`config.yaml` at startup, so changing the vision flags, `CUABOT_MONITOR`, etc.
+only takes effect on a NEW launch of the profile (e.g. `cuabot`). A blind run
+against the OLD config is NOT evidence the fix failed — relaunch before judging.
+See `references/hermes-vision-gating.md` for the full trace + verify command.
+
 ## PRIMARY-MONITOR SCREENSHOT + AUTO COORD MAPPING (single-monitor, accurate)
 For general desktop control, multi-monitor coords are a headache. The MCP
 `screenshot(window_name="primary")` path solves it:
@@ -326,6 +336,41 @@ For general desktop control, multi-monitor coords are a headache. The MCP
 - For window-specific screenshots (e.g. `window_name="mGBA"`), coords are
   WINDOW-LOCAL and `_to_global()` adds the window geometry offset instead. Both
   paths keep the model coordinate-free; only the server translates.
+
+## PITFALL — model reads COORDS OUTSIDE the image it was shown (the 8436 bug)
+This is the SINGLE most common click failure and it LOOKS like the
+"wrong monitor"/"wrong-target" bugs above, but the ROOT CAUSE is different:
+- SYMPTOM (2026-07-19): agent told to "click the settings icon on the desktop",
+  took `screenshot(window_name="primary")`, read coords `(1760, 975)`, and the
+  click landed on the far-right monitor's lower-right quarter. The click result
+  even reported `global (8436, 2552)` — off the entire 6400x1440 virtual desktop.
+- ROOT CAUSE: the primary screenshot is DOWNSCALED to `max_side=854` (so for a
+  1920x1080 monitor the image is only **854x480**). The model had NO idea of the
+  image's real pixel size, so it ASSUMED full-resolution and read `(1760, 975)` —
+  coordinates that do not even exist in an 854x480 image. Fed through the
+  (correct) scale mapping, that exploded to `(8436, 2552)`.
+  The old `meta` reported `scale` + `monitor` (useful for humans debugging, not
+  for the model's coordinate READ). It never told the model the image bounds.
+- FIX (shipped): the screenshot `meta` now returns `image_size: {w, h}` (the
+  ACTUAL downscaled image dimensions) plus an explicit note: "IMAGE is WxH px.
+  READ coords in that range [0..W, 0..H]. Do not use full-screen pixel numbers."
+  `_map_click` also CLAMPS the mapped global coord to the virtual desktop bounds
+  (`_virtual_bounds()` from xrandr) and returns a `warning` ("re-read coords from
+  the image (range in its meta)") when the requested coord is off-desktop — so a
+  bad read lands on a real monitor edge instead of flying off into the void.
+- VERIFY (persistent process): primary screenshot → check `meta.image_size`
+  equals the real downscaled dims (e.g. 854x480). Feed a deliberately out-of-range
+  click (1760,975) → result must contain `"warning": "CLAMPED..."` and `global`
+  within [0..vw, 0..vh]. Feed an in-range click (427,460) → global matches the
+  monitor math (no warning).
+- LESSON (for ANY vision+click agent, and for verification discipline): **verify
+  against how the model ACTUALLY reads coords, not just against synthetically-
+  correct inputs.** The earlier "MATCH" tests passed because they used hand-picked
+  in-range numbers; they never exercised the model's real (full-res-assuming)
+  read behavior. Always (a) include the image-size bound in the screenshot meta,
+  and (b) clamp out-of-range clicks. When the model reports a click "mapped to
+  global (8436, 2552)", do NOT chase a monitor-math bug — check whether the
+  coords it read were inside the image.
 
 ## PITFALL — missing `import` for a stdlib used only in one helper
 When a helper (e.g. `_primary_monitor`) uses `re.search` but the module only
@@ -389,7 +434,8 @@ mcp_servers:
   `{"result": res}` verbatim (no json.dumps). All other tools still get
   serialized as text. This bug cost a full debug cycle this session.
 - Verify the server before trusting it: `python3 test_mcp.py` (in the skill dir)
-  should print the 9 tool names (incl. `screenshot`) + a real `list_windows`
+  should print the 12 tool names (incl. `screenshot`, `screenshot_around_cursor`,
+  `mouse_location`) + a real `list_windows`
   result. If Hermes reports "no MCP servers connected", the server process is
   crashing on spawn — check it starts standalone first.
 
@@ -397,8 +443,36 @@ mcp_servers:
 A ~2B model (qwen3.5-2b-mtp) CANNOT reliably orchestrate 8 MCP tools + screenshots:
 it types tool names as literal text ("_xdotool_list_windows") and emits malformed
 `<function=computer_use>` calls with no args. Use a >=9B local model (e.g.
-gemma-4-12b-qat) for actual gameplay. The xdotool MCP + capture pipeline is proven;
-the bottleneck is model tool-calling competence, not the plumbing.
+gemma-4-12b-qat, qwen3.5-9b-mtp) for actual gameplay. The xdotool MCP + capture
+pipeline is proven; the bottleneck is model tool-calling competence, not plumbing.
+
+## CRITICAL KNOWN ISSUE — pixel-coordinate reading FAILS (the unsolved one)
+As of 2026-07-19 the full pipeline is VERIFIED CORRECT end-to-end:
+- Model receives the screenshot at exactly 854x480 (confirmed by inspecting
+  `~/.hermes/profiles/cuabot/cache/images/*.png` -> all 854x480; Hermes does NOT
+  re-resize because `_RESIZE_TARGET_BYTES`=5MB >> our ~140KB image).
+- `screenshot` meta returns `image_size {w:854,h:480}` so the model KNOWS the
+  valid coordinate range.
+- A valid in-range click (427,460) maps to global (3200,1378) = correct
+  bottom-middle of DP-2; cursor confirmed. Out-of-range reads are CLAMPED+warned.
+YET the agent still mis-clicks. ROOT CAUSE: the (9B) model cannot reliably
+READ pixel coordinates OUT of the screenshot and emit them in-range. Observed:
+it guessed (1760,975) on an 854x480 image (coordinates that don't exist in the
+frame). The image_size note + clamp mitigate but do NOT cure a model that can't
+localize pixels. THIS IS NOT A PLUMBING BUG — stop patching the coordinate math.
+THE FIX: switch from pixel-reading to ELEMENT-INDEXED clicking (what computer_use
+`mode='som'` does and why it works):
+1. A new tool `screenshot_som(window_name='primary')` returns the image PLUS a
+   numbered overlay of detected interactive elements (buttons, icons, text
+   fields) — like cua-driver's SOM, but we render it ourselves with pyautogui/
+   OpenCV (or reuse cua-driver's grounding). Each element gets index N + its
+  center (x,y) in the 854x480 space.
+2. `click_element(index)` looks up that element's center and clicks via the same
+   cached-map mapping. The model never outputs raw pixels — it outputs an
+   integer element number. This removes the failure mode entirely.
+Until that exists, the pixel path is a best-effort; for precise UI the model
+should use `screenshot_around_cursor` (high-res crop) + careful reading, and
+treat the clamp warning as "re-read, you were off-image".
 
 ## KNOWN ISSUES
 - **mGBA d-pad LEFT/RIGHT inverted** (observed in-game 2026-07-19): `mgba_agent.lua`
@@ -408,12 +482,14 @@ the bottleneck is model tool-calling competence, not the plumbing.
 - **ydotool `click` bit-mask for true drag is version-dependent.** The
   hold/release mask (`0x40`/`0x80`) is inferred; verify empirically if drag
   misbehaves.
+- **Pixel-coordinate reading is unreliable on ~9B models (see CRITICAL above).**
+  Build element-indexed clicking; do not keep tuning the pixel mapping.
 
 ## mGBA launch (software GL so it's capturable)
 `flatpak run --env=QT_OPENGL=software --env=LIBGL_ALWAYS_SOFTWARE=1 io.mgba.mGBA <rom>`
 
 ## Support files
-- `xdotool_mcp.py` — the working hand-rolled MCP server (9 tools incl.
+- `xdotool_mcp.py` — the working hand-rolled MCP server (12 tools incl.
   `screenshot`), at skill ROOT, NOT under `scripts/`. `scripts/xdotool_mcp.py`
   is a mirror copy for reference.
 - `references/emulator-internal-input.md` — THE primary mGBA input fix: drive
@@ -441,7 +517,12 @@ the bottleneck is model tool-calling competence, not the plumbing.
   `screenshot(window_name="primary")` single-monitor path with auto coordinate
   mapping; (3) the CACHED coordinate map fix (why bare `click(x,y)` now works via
   `STATE["map"]`, and the persistent-process caveat for testing); (4) the new
-  `screenshot_around_cursor` high-res precision tool.
+  screenshot_around_cursor` high-res precision tool.
+- `references/hermes-vision-gating.md` — WHY the agent "can't see" screenshots:
+  the two-gate Hermes vision mechanism (`image_input_mode: native` AND
+  `model.supports_vision: true`), exact source locations in `run_agent.py` /
+  `image_routing.py`, and the verify command. Read this FIRST if the model ever
+  reports "image saved at cache/images/... I can't see it".
 - Backup repo (rollback): `gurkebaui/cuabot-setup` on GitHub — full
   `cua_backend.py` patch, cuabot profile (config+SOUL.md), this server, the
   mgba_agent.lua socket script, and README.
